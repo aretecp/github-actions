@@ -1,0 +1,174 @@
+name: Claude Issue Triage (shared)
+
+# Reusable workflow that runs Claude Code on a freshly opened issue (or
+# `@claude` comment) to triage it: post a triage report comment, suggest
+# labels, suggest a branch name. Each consumer's
+# `.github/workflows/claude-issues.yml` becomes a thin shim.
+#
+# The system prompt is bundled in this repo at .claude/prompts/ci-triage.md
+# so it stays in sync across all consumers automatically — bump the prompt
+# here, all consumers pick it up on the next workflow run.
+#
+# Required secrets (caller must forward via `secrets:` block or `secrets: inherit`):
+#   ANTHROPIC_API_KEY — Claude API access
+#
+# Auto-provided to reusable workflows:
+#   GITHUB_TOKEN — issue comment + label updates
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Job environment scope. Required for env-level secret access in private repos on GitHub Free.'
+        required: false
+        type: string
+        default: production
+      checkout-ref:
+        description: 'Ref to check out from the consumer repo for Claude to analyze.'
+        required: false
+        type: string
+        default: main
+      shared-ref:
+        description: 'Ref of aretecp/github-actions to pull the system prompt from. Pin to v1 or a specific SHA for reproducibility.'
+        required: false
+        type: string
+        default: v1
+      claude-model:
+        description: 'Claude model alias.'
+        required: false
+        type: string
+        default: claude-sonnet-4-6
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: 'Anthropic API key for Claude.'
+        required: true
+
+jobs:
+  triage:
+    if: |
+      (github.event_name == 'issues') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout consumer repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          fetch-depth: 0
+
+      - name: Checkout shared workflow assets (for system prompt)
+        uses: actions/checkout@v4
+        with:
+          repository: aretecp/github-actions
+          ref: ${{ inputs.shared-ref }}
+          path: .shared-actions
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Acknowledge trigger
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions -f content=eyes
+          else
+            gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/reactions -f content=eyes
+          fi
+
+      - name: Get issue info
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NUMBER=${{ github.event.issue.number }}
+          TITLE=$(gh issue view $NUMBER --json title -q .title)
+          BODY=$(gh issue view $NUMBER --json body -q .body)
+          echo "number=$NUMBER" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "$BODY" > /tmp/issue-body.txt
+
+      - name: Build triage prompt
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+          ISSUE_TITLE="${{ steps.issue.outputs.title }}"
+
+          {
+            echo "Triage issue #${ISSUE_NUM}: ${ISSUE_TITLE}"
+            echo ""
+            echo "Issue body:"
+            echo "$ISSUE_BODY"
+            echo ""
+            echo "Repository is checked out at $(pwd). Analyze the codebase, then:"
+            echo "1. Analyze and produce your triage report"
+            echo "2. Add labels with: gh issue edit ${ISSUE_NUM} --add-label <label>"
+            echo "3. Estimate difficulty points (Fibonacci: 1,2,3,5,8,13) based on scope and complexity"
+            echo "4. Suggest a branch name in the report (do NOT create the branch — /work-issue creates it)"
+          } > /tmp/triage-prompt.txt
+
+          echo "::group::Triage prompt"
+          cat /tmp/triage-prompt.txt
+          echo "::endgroup::"
+
+          echo "::group::System prompt"
+          cat .shared-actions/.claude/prompts/ci-triage.md
+          echo "::endgroup::"
+
+      - name: Run Claude triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLAUDE_MODEL: ${{ inputs.claude-model }}
+        run: |
+          echo "Claude version: $(claude --version)"
+          echo "Starting triage for issue #${{ steps.issue.outputs.number }}..."
+
+          # Pipe via stdin instead of "$(cat ...)" — substituting the file
+          # content as a positional arg trips Linux ARG_MAX on large issue
+          # bodies.
+          claude \
+            --print \
+            --model "$CLAUDE_MODEL" \
+            --system-prompt-file .shared-actions/.claude/prompts/ci-triage.md \
+            --max-turns 20 \
+            --permission-mode bypassPermissions \
+            --verbose \
+            < /tmp/triage-prompt.txt \
+            2>/tmp/triage-stderr.log \
+            > /tmp/triage-output.md
+
+          EXIT_CODE=$?
+          echo "Claude exit code: ${EXIT_CODE}"
+
+          echo "::group::Claude stderr"
+          cat /tmp/triage-stderr.log || true
+          echo "::endgroup::"
+
+          echo "::group::Triage output"
+          cat /tmp/triage-output.md
+          echo "::endgroup::"
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::Claude triage failed with exit code ${EXIT_CODE}"
+            exit 1
+          fi
+
+          if [ ! -s /tmp/triage-output.md ]; then
+            echo "::error::Claude produced empty output"
+            exit 1
+          fi
+
+      - name: Comment on issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Posting triage comment to issue #${{ steps.issue.outputs.number }}..."
+          gh issue comment ${{ steps.issue.outputs.number }} --body-file /tmp/triage-output.md
+          echo "Done."
