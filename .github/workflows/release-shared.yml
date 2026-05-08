@@ -1,0 +1,146 @@
+name: Release (shared)
+
+# Reusable release workflow for Areté consumer repos. Each consumer's
+# .github/workflows/release.yml becomes a thin shim that calls this with
+# `uses: aretecp/github-actions/.github/workflows/release-shared.yml@v1`.
+#
+# Behavior:
+#   1. Promote a conventional-commit-style trigger commit if a squash-merge
+#      lacks a conventional prefix (or if `major` input is true).
+#   2. Run semantic-release to cut a new vX.Y.Z tag + GH Release.
+#   3. (Optional) Trigger a follow-up deploy workflow with the new tag.
+#
+# Consumer repos must have:
+#   - `package.json` with semantic-release configured
+#   - `main` branch as the release source
+#   - (Optional) a `deploy-prod.yml` workflow that accepts a `version` input —
+#     skip via `deploy-workflow: ''` if not present.
+
+on:
+  workflow_call:
+    inputs:
+      major:
+        description: 'Force major version bump (e.g. 1.x.x → 2.0.0)'
+        required: false
+        type: boolean
+        default: false
+      deploy-workflow:
+        description: >-
+          Workflow file (in the calling repo) to trigger after a successful
+          release. Receives the new tag via `version` input. Pass an empty
+          string to skip the deploy trigger entirely.
+        required: false
+        type: string
+        default: deploy-prod.yml
+      node-version:
+        description: 'Node.js version to use for semantic-release.'
+        required: false
+        type: string
+        default: '22'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - run: npm ci
+
+      - name: Promote squash-merge commit type
+        env:
+          MAJOR_BUMP: ${{ inputs.major }}
+        run: |
+          # Manual major bump via workflow_dispatch input
+          if [[ "$MAJOR_BUMP" == "true" ]]; then
+            echo "Manual major bump requested"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "feat: major release [skip ci]" -m "BREAKING CHANGE: manual major version bump" --no-verify
+            git push origin main
+            exit 0
+          fi
+
+          # Squash-merged develop→main PRs have subjects like "Develop (#N)"
+          # with conventional commit lines in the body. Semantic-release only
+          # reads the subject, so we add a new empty commit with the
+          # highest-priority type found in the body as a conventional prefix.
+          # Cannot amend — semantic-release rejects when local diverges from
+          # remote.
+          SUBJECT=$(git log -1 --format="%s")
+          if echo "$SUBJECT" | grep -qE "^(feat|fix|chore|refactor|perf|docs|test)"; then
+            echo "Subject already has conventional prefix — skipping"
+            exit 0
+          fi
+
+          BODY=$(git log -1 --format="%b")
+
+          # Check for breaking changes first (highest priority → major bump)
+          IS_BREAKING=false
+          if echo "$BODY" | grep -qiE "BREAKING CHANGE|^\* feat!:|^\* fix!:"; then
+            IS_BREAKING=true
+          fi
+
+          if echo "$BODY" | grep -qE "^\* feat"; then
+            TYPE="feat"
+          elif echo "$BODY" | grep -qE "^\* fix"; then
+            TYPE="fix"
+          elif echo "$BODY" | grep -qE "^\* refactor"; then
+            TYPE="refactor"
+          elif echo "$BODY" | grep -qE "^\* perf"; then
+            TYPE="perf"
+          else
+            echo "No conventional commits found in body — skipping (no release this push)"
+            exit 0
+          fi
+
+          MSG="${TYPE}: ${SUBJECT}"
+          BREAKING_FOOTER=""
+          if [[ "$IS_BREAKING" == "true" ]]; then
+            BREAKING_FOOTER="BREAKING CHANGE: breaking changes detected in squash-merge body"
+          fi
+          echo "Adding release trigger commit: $MSG"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [[ -n "$BREAKING_FOOTER" ]]; then
+            git commit --allow-empty -m "${MSG} [skip ci]" -m "$BREAKING_FOOTER" --no-verify
+          else
+            git commit --allow-empty -m "${MSG} [skip ci]" --no-verify
+          fi
+          git push origin main
+
+      - name: Get current latest tag
+        id: before
+        run: echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo none)" >> "$GITHUB_OUTPUT"
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger production deploy if new release
+        if: inputs.deploy-workflow != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy-workflow }}
+          BEFORE_TAG: ${{ steps.before.outputs.tag }}
+        run: |
+          LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || echo none)
+
+          if [[ "$LATEST_TAG" == "$BEFORE_TAG" || "$LATEST_TAG" == "none" ]]; then
+            echo "No new release — skipping deploy"
+            exit 0
+          fi
+
+          echo "New release: $LATEST_TAG (was $BEFORE_TAG) — triggering $DEPLOY_WORKFLOW"
+          gh workflow run "$DEPLOY_WORKFLOW" -f version="$LATEST_TAG"
