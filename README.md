@@ -7,6 +7,7 @@ Reusable composite actions and workflows for `aretecp` repos. Drop-in `uses:` re
 | Action | Description | Status |
 |---|---|---|
 | [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | `v1.0.1` |
+| [`tailscale-connect`](actions/tailscale-connect) | Join the Areté Tailscale tailnet. Wraps `tailscale/github-action` with a pinned SHA and corrected input names. | `v1` |
 
 More to come — Tailscale connect, Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
 
