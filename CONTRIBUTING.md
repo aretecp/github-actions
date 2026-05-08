@@ -95,6 +95,25 @@ Every action needs a smoke-test workflow that runs on PRs touching `actions/<nam
 
 If your action needs secrets, get them added as **org-level** Actions secrets so other consumers can use the same names — don't bake repo-specific secret names into the action.
 
+## Env-scoping rule for workflows
+
+**Any workflow consuming environment-level GH Actions secrets MUST declare `environment:` on the job that needs them.**
+
+```yaml
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    environment: production   # ← required, otherwise env-scoped secrets are empty
+    steps:
+      - run: echo "$ANTHROPIC_API_KEY"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Without the `environment:` line, `${{ secrets.X }}` resolves to empty for any secret stored at the environment level. Repo-level secrets still resolve. **In private repos on GitHub Free orgs, org-level secrets also fail to resolve regardless** — workaround in [`scripts/sync-infisical-config.sh`](scripts/sync-infisical-config.sh) for that case.
+
+This rule cost us a debugging cycle on the `load-infisical-secrets` pilot and silently broke the `pr-to-main-hooks.yml` workflow in two repos (Claude PR summaries + Teams notifications no-op'd for months). When in doubt, add the `environment:` line.
+
 ## Commit + PR conventions
 
 - Conventional prefixes: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`.
