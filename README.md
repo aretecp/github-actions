@@ -51,6 +51,10 @@ Or pin to a specific version / SHA for stricter reproducibility:
 
 Breaking changes bump the major. The `v1` tag stays on `1.x` forever.
 
+## Shared scripts
+
+[`scripts/`](scripts) holds bash utilities consumed by SSH-script-based deploy workflows (the GH runner can't reach the VPS's Docker daemon, so these run on the VPS via `curl | bash` at deploy time). See [`scripts/README.md`](scripts/README.md) for the catalog and pinning guidance.
+
 ## Releasing
 
 Cutting a new version of any action in this repo: see [`RELEASING.md`](RELEASING.md).
