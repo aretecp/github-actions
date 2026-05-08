@@ -40,35 +40,48 @@ Once the version is chosen, the rest is mechanical.
 
 ## Procedure
 
-Releases are cut via the **Release** workflow (`.github/workflows/release.yml`). No terminal commands required.
+Most releases happen **automatically** on push to `main`. Override manually only for pre-releases or out-of-band cuts.
 
-### Sanity check (optional but recommended)
+### Auto-release (default — every push to main)
 
-Before clicking the button, glance at what's in the release:
+The Release workflow (`.github/workflows/release.yml`) runs on every push to `main`. It reads the merge commit's conventional prefix and decides:
+
+| Commit subject pattern | Action |
+|---|---|
+| `feat: ...` or `feat(scope): ...` | Auto-bump **minor** + cut release |
+| `fix: ...` or `fix(scope): ...` | Auto-bump **patch** + cut release |
+| `feat!:` / `fix!:` / contains `BREAKING CHANGE` | Auto-bump **major** + cut release |
+| `chore:` / `docs:` / `refactor:` / `test:` / `style:` / `ci:` / `build:` | **Skip** — no release |
+| Anything else | **Skip** — no release |
+
+**Squash-merge convention.** Areté uses squash-merges, so the merge commit's subject is whatever was in the PR title. **Use a conventional prefix on PR titles** for auto-release to fire correctly.
+
+### Sanity check (optional)
 
 ```bash
 git fetch origin --tags
 git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || echo '')..origin/main
 ```
 
-Pick a version that matches the bump rules above.
+### Manual override (workflow_dispatch)
 
-### Cut the release
+For pre-releases (e.g. `v2.0.0-rc.1`) or out-of-band cuts, override the auto-detect:
 
 1. Go to **Actions → Release** → **Run workflow** in the GitHub UI.
 2. Fill in:
    - **Branch:** `main`
-   - **Version:** the new version (e.g. `v1.0.1`, `v2.0.0`, `v2.0.0-rc.1`)
-   - **Update moving major tag:** ✅ checked for stable releases. **Uncheck for pre-releases** (`-rc`, `-beta`, etc.) — pre-releases shouldn't advance `vN`.
+   - **Version:** the explicit version (e.g. `v2.0.0-rc.1`). Leave blank to use the auto-detect path.
+   - **Update moving major tag:** ✅ checked for stable releases. **Uncheck for pre-releases**.
 3. Click **Run workflow**.
 
 The workflow:
-1. Validates the version format (`vMAJOR.MINOR.PATCH` with optional `-prerelease`)
-2. Verifies the tag doesn't already exist
-3. Creates the annotated `vX.Y.Z` tag and pushes it
-4. Force-updates the moving `vX` tag (unless skipped)
-5. Creates a GitHub Release with auto-generated notes (pre-releases marked as such)
-6. Posts a step-summary with links
+1. Determines version (auto-detect from commit prefix, OR uses the manual input)
+2. Validates the version format (`vMAJOR.MINOR.PATCH` with optional `-prerelease`)
+3. Verifies the tag doesn't already exist
+4. Creates the annotated `vX.Y.Z` tag and pushes it
+5. Force-updates the moving `vX` tag (unless pre-release or explicitly disabled)
+6. Creates a GitHub Release with auto-generated notes (pre-releases marked as such)
+7. Posts a step-summary with links
 
 ### Manual fallback
 
