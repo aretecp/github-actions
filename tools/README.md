@@ -8,6 +8,7 @@ For runtime scripts that consumer workflows fetch + execute on the VPS, see [`..
 
 | Script | Description | Audience |
 |---|---|---|
+| [`setup-github-project.sh`](setup-github-project.sh) | One-shot setup of the standard Areté GH project + label structure on a new repo. Three modes: clone-from-template, greenfield, interactive. Backfills existing issues into the project. | Maintainer, new repo setup |
 | [`sync-infisical-config.sh`](sync-infisical-config.sh) | Mirror org-level Infisical secrets/vars to per-repo level across N repos. Workaround for GitHub Free org's lack of org-secret cascade to private repos. Run on initial setup, after rotating credentials, or when adding a new consumer repo. | Maintainer |
 | [`cleanup-areteos-after-prod.sh`](cleanup-areteos-after-prod.sh) | Delete now-redundant per-repo / per-environment GH secrets in `aretecp/areteos` after both prod and dev workflows finish migrating to Infisical. | Maintainer, post-migration |
 | [`cleanup-arilearn-phx-after-prod.sh`](cleanup-arilearn-phx-after-prod.sh) | Same idea for `aretecp/arilearn-phx`. | Maintainer, post-migration |
