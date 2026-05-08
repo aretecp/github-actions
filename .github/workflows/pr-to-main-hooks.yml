@@ -1,0 +1,354 @@
+name: PR to main — hooks (shared)
+
+# Reusable workflow that runs on PRs targeting `main`:
+#   1. Gather PR context (commits, diff, candidate issue references)
+#   2. Generate a Markdown summary via Claude
+#   3. Update the PR body with the summary + Closes #N footers
+#   4. Post a Teams card with the latest body (opened / ready_for_review only)
+#
+# Each consumer's `.github/workflows/pr-to-main-hooks.yml` becomes a thin
+# shim that calls this with `uses: aretecp/github-actions/.github/workflows/pr-to-main-hooks.yml@v1`.
+#
+# Reviewers are NOT auto-assigned — the PR author requests reviews
+# manually so we can match the right person to the change.
+#
+# The Teams card runs LAST so it sees the auto-generated PR body, not the
+# original empty / placeholder one. Step 4 skips drafts and skips
+# `synchronize` events (which fire on every push) so we don't re-post
+# the card on every commit.
+#
+# Required secrets (caller forwards via `secrets:` block):
+#   ANTHROPIC_API_KEY            — Claude summary
+#   TEAMS_PR_NOTIFY_WEBHOOK_URL  — Teams card destination
+#
+# Auto-provided to reusable workflows:
+#   GITHUB_TOKEN — PR body update + issue lookups
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          Job environment scope. Required for env-level secret access in
+          private repos on GitHub Free. Default `production` matches where
+          ANTHROPIC_API_KEY and TEAMS_PR_NOTIFY_WEBHOOK_URL typically live.
+        required: false
+        type: string
+        default: production
+      claude-model:
+        description: 'Claude model alias for the summary step.'
+        required: false
+        type: string
+        default: claude-sonnet-4-6
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: 'Anthropic API key for the Claude summary step.'
+        required: true
+      TEAMS_PR_NOTIFY_WEBHOOK_URL:
+        description: 'Teams Workflow incoming webhook URL for PR notifications.'
+        required: true
+
+jobs:
+  link-issues:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Gather PR context
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          REPO=${{ github.repository }}
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+
+          # Get all commit messages in this PR
+          COMMITS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate -q '.[].commit.message')
+          echo "$COMMITS" > /tmp/commits.txt
+
+          # Extract issue numbers: filter out merge commits, then grab all #N from the rest
+          NON_MERGE=$(echo "$COMMITS" | grep -viE '^Merge (pull request|branch)' || true)
+          echo "::group::Non-merge commit lines"
+          echo "$NON_MERGE"
+          echo "::endgroup::"
+
+          CANDIDATES=$(echo "$NON_MERGE" | grep -oE '#[0-9]+' | sort -t'#' -k2 -n -u | tr -d '#' || true)
+          echo "Candidates: $CANDIDATES"
+
+          # Validate each candidate is an actual issue (not a PR)
+          : > /tmp/issues.txt
+          : > /tmp/issue-context.txt
+          for NUM in $CANDIDATES; do
+            echo "Validating #${NUM}..."
+            TITLE=$(gh issue view "$NUM" --repo "$REPO" --json title -q '.title' 2>/dev/null) || { echo "  -> skipped (not an issue)"; continue; }
+            echo "  -> found: ${TITLE}"
+            echo "$NUM" >> /tmp/issues.txt
+            echo "#${NUM}: ${TITLE}" >> /tmp/issue-context.txt
+          done
+          echo "Final issues: $(cat /tmp/issues.txt | tr '\n' ' ')"
+
+          # Exclude generated artifacts and lockfiles from what we hand to
+          # Claude — they bloat the prompt without adding signal. Patterns
+          # cover Elixir/Phoenix, Node, and common front-end build outputs.
+          DIFF_EXCLUDES=(
+            ':(exclude)mix.lock'
+            ':(exclude)package-lock.json'
+            ':(exclude)mcp_apps/package-lock.json'
+            ':(exclude)priv/static/**'
+            ':(exclude)priv/mcp_apps/dist/**'
+            ':(exclude)assets/vendor/**'
+          )
+
+          # Generate the diff stat for the summary
+          git diff --stat "${BASE}..${HEAD}" -- "${DIFF_EXCLUDES[@]}" > /tmp/diffstat.txt
+
+          # Generate the full diff for Claude to summarize
+          git diff "${BASE}..${HEAD}" -- "${DIFF_EXCLUDES[@]}" > /tmp/full-diff.txt
+
+      - name: Generate PR summary with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ inputs.claude-model }}
+        run: |
+          set -euo pipefail
+
+          COMMITS=$(cat /tmp/commits.txt)
+          DIFFSTAT=$(cat /tmp/diffstat.txt)
+          ISSUES=$(cat /tmp/issue-context.txt)
+
+          cat > /tmp/summary-prompt.txt << 'PROMPTEOF'
+          You are writing a PR description for a pull request to main.
+
+          Write a concise, high-level summary of the changes in this PR. Focus on:
+          - What changed and why (intent, not line-by-line)
+          - Key decisions or tradeoffs visible in the diff
+          - Any breaking changes or things reviewers should pay attention to
+
+          Format as markdown with a ## Summary heading and short bullet points.
+          Keep it to 3-8 bullets. No filler. No "this PR does...". Just the facts.
+          Each bullet should reference the issue number(s) it relates to in parentheses, e.g. "(#42)".
+
+          Do NOT include closing keywords (Closes, Fixes, etc.) — those are added separately.
+          Output ONLY the markdown summary, nothing else.
+          PROMPTEOF
+
+          cat >> /tmp/summary-prompt.txt << EOF
+
+          --- Commits ---
+          ${COMMITS}
+
+          --- Diffstat ---
+          ${DIFFSTAT}
+
+          --- Linked Issues ---
+          ${ISSUES}
+
+          --- Full Diff ---
+          $(head -c 20000 /tmp/full-diff.txt)
+          EOF
+
+          # Pipe the prompt via stdin instead of "$(cat ...)" — large PRs
+          # (think develop → main release PRs) blow past Linux ARG_MAX when
+          # the prompt becomes a command-line arg, which kicks the workflow
+          # into the fallback branch and dumps every commit into the card.
+          # 20K diff cap above is the secondary safety net.
+          if ! claude \
+                 --print \
+                 --model "$CLAUDE_MODEL" \
+                 --max-turns 1 \
+                 < /tmp/summary-prompt.txt \
+                 > /tmp/summary.md \
+             || [ ! -s /tmp/summary.md ]; then
+            echo "::warning::Claude summary step failed or returned empty — using minimal fallback"
+            {
+              echo "## Summary"
+              echo
+              echo "_(auto-summary unavailable)_"
+            } > /tmp/summary.md
+          fi
+
+      - name: Update PR description
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          REPO=${{ github.repository }}
+          ISSUES=$(cat /tmp/issues.txt)
+
+          # Get current PR body
+          CURRENT_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q '.body // ""')
+
+          SUMMARY=$(cat /tmp/summary.md)
+
+          # Collect existing Closes #N from body (with or without markers)
+          EXISTING_CLOSES=$(printf "%b" "$CURRENT_BODY" | grep -oiE '(closes|close|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -n -u || true)
+
+          # Union existing closes with newly discovered issues
+          ALL_ISSUES=$(printf "%s\n%s" "$EXISTING_CLOSES" "$(cat /tmp/issues.txt)" | grep -v '^$' | sort -n -u || true)
+
+          # Build Closes lines
+          CLOSES_LINES=""
+          for ISSUE in $ALL_ISSUES; do
+            CLOSES_LINES="${CLOSES_LINES}Closes #${ISSUE}\n"
+          done
+
+          # Build the auto-generated sections with markers
+          AUTO_SUMMARY="<!-- auto-summary -->\n${SUMMARY}\n<!-- /auto-summary -->"
+
+          AUTO_CLOSES=""
+          if [ -n "$CLOSES_LINES" ]; then
+            AUTO_CLOSES="<!-- auto-closes -->\n${CLOSES_LINES}<!-- /auto-closes -->"
+          fi
+
+          # Strip existing auto-generated sections AND any legacy closes blocks from the body
+          CLEAN_BODY=$(printf "%b" "$CURRENT_BODY" \
+            | perl -0777 -pe 's/\n*---\n*\n*<!-- auto-summary -->.*?<!-- \/auto-summary -->//gs' \
+            | perl -0777 -pe 's/\n*<!-- auto-summary -->.*?<!-- \/auto-summary -->//gs' \
+            | perl -0777 -pe 's/\n*<!-- auto-closes -->.*?<!-- \/auto-closes -->//gs' \
+            | perl -0777 -pe 's/\n*---\n*\n*(Closes\s+#\d+\n*)+//gis' \
+            | perl -0777 -pe 's/\n*(Closes\s+#\d+\n*)+//gis')
+
+          # Trim trailing whitespace/newlines from clean body
+          CLEAN_BODY=$(echo "$CLEAN_BODY" | sed -e 's/[[:space:]]*$//')
+
+          # Assemble the new body
+          NEW_BODY=""
+          if [ -n "$CLEAN_BODY" ]; then
+            NEW_BODY="${CLEAN_BODY}\n\n"
+          fi
+
+          if [ -n "$AUTO_CLOSES" ]; then
+            NEW_BODY="${NEW_BODY}${AUTO_CLOSES}\n\n---\n\n"
+          fi
+
+          NEW_BODY="${NEW_BODY}${AUTO_SUMMARY}"
+
+          printf "%b" "$NEW_BODY" > /tmp/pr-body.txt
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --body-file /tmp/pr-body.txt
+
+          echo "Updated PR #${PR_NUMBER}"
+
+      - name: Post to Teams (with auto-generated PR body)
+        # Same gating as the reviewer step — fires once on PR open / ready,
+        # not on every push. Runs AFTER the body update so the card text
+        # reflects the AI-generated summary, not the user's placeholder.
+        if: |
+          !github.event.pull_request.draft &&
+          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK: ${{ secrets.TEAMS_PR_NOTIFY_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          # Re-fetch the PR body so we get the AI-generated summary, not
+          # the stale snapshot from when the workflow started.
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q '.body // ""')
+
+          # Pull just the AI summary section if pr-close-issues steps wrote
+          # one — the markers are <!-- auto-summary --> ... <!-- /auto-summary -->.
+          # Falls back to the raw body if no marker present (PR opened
+          # before the AI step ran on this exact event).
+          if printf '%s' "$BODY" | grep -q '<!-- auto-summary -->'; then
+            DESC=$(printf '%s' "$BODY" \
+              | sed -n '/<!-- auto-summary -->/,/<!-- \/auto-summary -->/p' \
+              | sed '1d;$d' \
+              | sed 's/^## *Summary[[:space:]]*$//')
+          else
+            # Strip Closes / Fixes / Resolves lines so they don't show up
+            # twice (once here, once in the Closes facts row).
+            DESC=$(printf '%s' "$BODY" \
+              | sed -E '/^[[:space:]]*(closes|close|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+/Id' \
+              | sed -E '/<!--[[:space:]]*auto-(closes|summary)[[:space:]]*-->/,/<!--[[:space:]]*\/auto-(closes|summary)[[:space:]]*-->/d')
+          fi
+
+          # Trim leading/trailing whitespace, then truncate.
+          DESC=$(printf '%s' "$DESC" | awk 'NF { p=1 } p' | sed -e 's/[[:space:]]*$//')
+          if [ -z "$DESC" ]; then
+            DESC="_(no description)_"
+          elif [ "${#DESC}" -gt 500 ]; then
+            DESC="${DESC:0:500}…"
+          fi
+
+          # Linked issues — same closing-keyword set the GitHub auto-closer uses.
+          LINKED=$(printf '%s' "$BODY" \
+            | grep -oiE '(closes|close|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]+#[0-9]+' \
+            | grep -oE '#[0-9]+' \
+            | sort -u \
+            | paste -sd ', ' - || true)
+          [ -z "$LINKED" ] && LINKED="—"
+
+          DIFFSTAT="+${PR_ADDITIONS} −${PR_DELETIONS} across ${PR_CHANGED_FILES} file(s)"
+
+          # Append a markdown link to the description so users get a
+          # clickable "View PR" affordance — Teams Workflow webhooks
+          # render `potentialAction` buttons inconsistently, but inline
+          # markdown links work everywhere. Two-line gap (\n\n) separates
+          # it visually from the summary text.
+          DESC_WITH_LINK=$(printf '%s\n\n[View PR →](%s)' "$DESC" "$PR_URL")
+
+          # jq builds the payload with proper string escaping — avoids
+          # quoting bugs on PR titles or bodies that contain " or backticks.
+          PAYLOAD=$(jq -n \
+            --arg title "${REPO} · PR #${PR_NUMBER} → ${PR_BASE}" \
+            --arg pr_title "$PR_TITLE" \
+            --arg activity "opened by **${PR_AUTHOR}**" \
+            --arg branches "\`${PR_HEAD}\` → \`${PR_BASE}\`" \
+            --arg desc "$DESC_WITH_LINK" \
+            --arg diffstat "$DIFFSTAT" \
+            --arg linked "$LINKED" \
+            --arg url "$PR_URL" \
+            '{
+              "@type": "MessageCard",
+              "@context": "http://schema.org/extensions",
+              "themeColor": "0076D7",
+              "summary": $title,
+              "title": $title,
+              "text": ("**" + $pr_title + "**"),
+              "sections": [{
+                "activityTitle": $activity,
+                "activitySubtitle": $branches,
+                "facts": [
+                  {"name": "Diff",   "value": $diffstat},
+                  {"name": "Closes", "value": $linked}
+                ],
+                "text": $desc
+              }],
+              "potentialAction": [{
+                "@type": "OpenUri",
+                "name": "View PR",
+                "targets": [{"os": "default", "uri": $url}]
+              }]
+            }')
+
+          # Fail loud if the webhook returns non-2xx so config drift
+          # (revoked URL, malformed payload) shows up in the workflow run.
+          curl -fsS -H 'Content-Type: application/json' \
+               -d "$PAYLOAD" "$WEBHOOK"

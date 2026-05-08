@@ -16,6 +16,7 @@ More to come — Tailscale connect, Slack notify, Elixir/OTP setup, uv/Python se
 |---|---|---|
 | [`release-shared.yml`](.github/workflows/release-shared.yml) | Squash-merge → conventional-commit promotion → semantic-release → optional deploy trigger | `v1` |
 | [`claude-issue-triage.yml`](.github/workflows/claude-issue-triage.yml) | Auto-triage of new issues / `@claude` comments via Claude Code. Bundled system prompt at `.claude/prompts/ci-triage.md`. | `v1` |
+| [`pr-to-main-hooks.yml`](.github/workflows/pr-to-main-hooks.yml) | On PRs targeting `main`: gather context → Claude summary → update PR body + Closes #N footers → Teams card. | `v1` |
 
 Reusable workflows are called via `jobs.<name>.uses: aretecp/github-actions/.github/workflows/<file>@v1` in the consumer repo. See the workflow file's header comments for inputs and prerequisites.
 
