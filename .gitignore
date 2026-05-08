@@ -19,3 +19,7 @@ secrets.env
 # Node (if/when JS-based actions or test harnesses get added)
 node_modules/
 dist/
+
+# Claude Code local state (project rules / CLAUDE.md may still be committed)
+.claude/settings.local.json
+.claude/memory/
