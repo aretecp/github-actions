@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local Infisical CLI artifacts
+.infisical.json
+secrets.env
+
+# Local env files (smoke-testing)
+.env
+.env.*
+!.env.example
+
+# Node (if/when JS-based actions or test harnesses get added)
+node_modules/
+dist/
