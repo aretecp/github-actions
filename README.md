@@ -6,7 +6,7 @@ Reusable composite actions for `aretecp` repos. Drop-in `uses:` references with 
 
 | Action | Description | Status |
 |---|---|---|
-| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | _in development_ |
+| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | `v1.0.0` |
 
 More to come — Tailscale connect, Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
 
@@ -39,6 +39,10 @@ Or pin to a specific version / SHA for stricter reproducibility:
 - `@<sha>` — strictest. Pin if your security posture requires it.
 
 Breaking changes bump the major. The `v1` tag stays on `1.x` forever.
+
+## Releasing
+
+Cutting a new version of any action in this repo: see [`RELEASING.md`](RELEASING.md).
 
 ## License
 
