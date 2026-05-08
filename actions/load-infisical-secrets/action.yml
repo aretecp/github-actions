@@ -67,7 +67,7 @@ inputs:
       to target Infisical Cloud (`https://app.infisical.com`) or another
       instance.
     required: false
-    default: https://secrets.areteintelligence.ai/
+    default: https://secrets.areteintelligence.ai
 
 outputs:
   secrets:

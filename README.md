@@ -17,11 +17,13 @@ Pin to the moving major tag for non-breaking updates:
 ```yaml
 - uses: aretecp/github-actions/actions/load-infisical-secrets@v1
   with:
-    project-slug: arete-platform
+    project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
     environment: prod
     client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
     client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
 ```
+
+> Each consuming workflow needs access to the `INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` org secrets and the `INFISICAL_*_PROJECT_SLUG` org variables. See the action's [`README`](actions/load-infisical-secrets/README.md#prerequisites) for full prerequisites.
 
 Or pin to a specific version / SHA for stricter reproducibility:
 
