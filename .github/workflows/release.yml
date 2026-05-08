@@ -1,22 +1,33 @@
 name: Release
 
-# Manual release trigger. Click "Run workflow" in the Actions UI, type the
-# version (e.g. v1.0.0), choose whether to advance the moving major tag,
-# and the workflow handles the rest:
+# Auto-release on push to main, OR manual via workflow_dispatch.
+#
+# Auto behavior (push):
+#   - Reads the latest commit subject. If it starts with `feat:` or `fix:`
+#     (or has BREAKING CHANGE / `feat!:` / `fix!:`), determines the bump
+#     and auto-cuts the next vX.Y.Z. Other prefixes (chore/docs/refactor/
+#     test/style/ci) are skipped — no release, workflow exits cleanly.
+#
+# Manual override (workflow_dispatch):
+#   - Provide an explicit `version` input to bypass the auto-detect logic
+#     entirely. Useful for pre-releases or out-of-band bumps.
+#
+# In both modes, the workflow:
 #   1. Validates the version format
 #   2. Creates the annotated `vX.Y.Z` tag and pushes it
-#   3. Force-updates the moving `vX` tag (unless skipped — useful for
-#      pre-releases like `v2.0.0-rc.1`)
+#   3. Force-updates the moving `vX` tag (unless pre-release)
 #   4. Creates a GitHub Release with auto-generated notes
 #
 # RELEASING.md documents the full procedure and bump-rule reference.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g. v1.0.1, v2.0.0-rc.1)"
-        required: true
+        description: "Version to release (e.g. v1.0.1, v2.0.0-rc.1). Leave blank to auto-detect from commit prefix."
+        required: false
         type: string
       update-major-tag:
         description: "Force-update the moving major tag (v1, v2, ...). Uncheck for pre-releases."
@@ -30,44 +41,112 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate version format
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-            echo "::error::Version must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE (e.g. v1.0.0, v1.0.1, v2.0.0-rc.1). Got: '$VERSION'"
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Determine version + skip
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Manual override path: workflow_dispatch with explicit version
+          if [[ -n "$INPUT_VERSION" ]]; then
+            echo "Using explicit version from workflow_dispatch: $INPUT_VERSION"
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Auto-detect from latest commit's conventional prefix
+          SUBJECT=$(git log -1 --format="%s")
+          BODY=$(git log -1 --format="%b")
+          echo "Latest commit subject: $SUBJECT"
+
+          # Skip non-release prefixes silently. The release workflow will
+          # still run on every push to main, but exits cleanly when the
+          # commit doesn't represent shippable changes.
+          if echo "$SUBJECT" | grep -qiE '^(docs|chore|refactor|test|style|ci|build)(\(.+\))?:'; then
+            echo "::notice::Subject prefix is non-release ($SUBJECT) — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Get current latest version, default to v0.0.0 if no tags yet
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          LATEST_NUM=${LATEST#v}
+          # Strip any pre-release suffix from the latest tag
+          LATEST_NUM=${LATEST_NUM%%-*}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_NUM"
+
+          # Determine bump kind
+          if echo "$SUBJECT $BODY" | grep -qE 'BREAKING CHANGE|^feat!:|^fix!:'; then
+            MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0
+            BUMP=major
+          elif echo "$SUBJECT" | grep -qE '^feat(\(.+\))?:'; then
+            MINOR=$((MINOR+1)); PATCH=0
+            BUMP=minor
+          elif echo "$SUBJECT" | grep -qE '^fix(\(.+\))?:'; then
+            PATCH=$((PATCH+1))
+            BUMP=patch
+          else
+            echo "::notice::Subject doesn't match feat/fix/breaking — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "::notice::Determined version: $VERSION ($BUMP bump from $LATEST)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Validate version format
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Version must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE. Got: '$VERSION'"
+            exit 1
+          fi
+
       - name: Configure git identity
+        if: steps.version.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Verify tag does not already exist
+        if: steps.version.outputs.skip != 'true'
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q "$VERSION"; then
-            echo "::error::Tag $VERSION already exists on origin. To re-cut, bump to the next patch."
+            echo "::error::Tag $VERSION already exists on origin. Rare race: re-run after another commit lands."
             exit 1
           fi
 
       - name: Tag the release commit
+        if: steps.version.outputs.skip != 'true'
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "$VERSION"
 
       - name: Update moving major tag
-        if: inputs.update-major-tag
+        # Skip if explicitly disabled OR if this is a pre-release.
+        # `inputs.update-major-tag` is null on push events — `!= false`
+        # treats null as "yes, advance".
+        if: |
+          steps.version.outputs.skip != 'true' &&
+          inputs.update-major-tag != false &&
+          !contains(steps.version.outputs.version, '-')
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           MAJOR=$(echo "$VERSION" | grep -oE '^v[0-9]+')
           if [[ -z "$MAJOR" ]]; then
@@ -79,10 +158,11 @@ jobs:
           echo "::notice::Moving tag $MAJOR now points at $VERSION"
 
       - name: Create GitHub Release
+        if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          IS_PRERELEASE: ${{ contains(inputs.version, '-') }}
+          VERSION: ${{ steps.version.outputs.version }}
+          IS_PRERELEASE: ${{ contains(steps.version.outputs.version, '-') }}
         run: |
           PRERELEASE_FLAG=""
           if [[ "$IS_PRERELEASE" == "true" ]]; then
@@ -94,21 +174,32 @@ jobs:
             $PRERELEASE_FLAG
 
       - name: Summary
+        if: always()
         env:
-          VERSION: ${{ inputs.version }}
-          UPDATE_MAJOR: ${{ inputs.update-major-tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SKIP: ${{ steps.version.outputs.skip }}
+          EVENT: ${{ github.event_name }}
         run: |
+          if [[ "$SKIP" == "true" ]]; then
+            {
+              echo "## No release this push"
+              echo ""
+              echo "Latest commit subject didn't match a release-worthy conventional prefix (feat/fix/BREAKING)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "## Released $VERSION"
             echo ""
             echo "- **Annotated tag:** \`$VERSION\` (immutable)"
-            if [[ "$UPDATE_MAJOR" == "true" ]]; then
+            if [[ "$VERSION" == *-* ]]; then
+              echo "- **Moving major tag:** not updated (pre-release)"
+            else
               MAJOR=$(echo "$VERSION" | grep -oE '^v[0-9]+')
               echo "- **Moving major tag:** \`$MAJOR\` advanced to \`$VERSION\`"
-            else
-              echo "- **Moving major tag:** not updated (pre-release or explicit skip)"
             fi
             echo "- **GitHub Release:** [$VERSION](${{ github.server_url }}/${{ github.repository }}/releases/tag/$VERSION)"
+            echo "- **Trigger:** $EVENT"
             echo ""
             echo "Consumers pinned to \`@$(echo "$VERSION" | grep -oE '^v[0-9]+')\` will pick this up automatically on their next workflow run."
           } >> "$GITHUB_STEP_SUMMARY"
