@@ -1,14 +1,22 @@
 # Areté Capital Partners — Shared GitHub Actions
 
-Reusable composite actions for `aretecp` repos. Drop-in `uses:` references with org defaults baked in — no copy-pasted workflow steps across repos.
+Reusable composite actions and workflows for `aretecp` repos. Drop-in `uses:` references with org defaults baked in — no copy-pasted workflow steps across repos.
 
-## Available actions
+## Available composite actions
 
 | Action | Description | Status |
 |---|---|---|
-| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | `v1.0.0` |
+| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | `v1.0.1` |
 
 More to come — Tailscale connect, Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
+
+## Available reusable workflows
+
+| Workflow | Description | Status |
+|---|---|---|
+| [`release-shared.yml`](.github/workflows/release-shared.yml) | Squash-merge → conventional-commit promotion → semantic-release → optional deploy trigger | `v1` |
+
+Reusable workflows are called via `jobs.<name>.uses: aretecp/github-actions/.github/workflows/<file>@v1` in the consumer repo. See the workflow file's header comments for inputs and prerequisites.
 
 ## Usage
 
