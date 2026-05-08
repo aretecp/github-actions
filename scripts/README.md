@@ -1,15 +1,14 @@
 # `scripts/`
 
-Shared bash utilities consumed by the org's deploy workflows. These run **on the deploy target** (VPS) inside an SSH-action's `script:` block, NOT on the GitHub runner. That's why they live here as scripts rather than as composite actions.
+**Runtime-shared bash utilities** consumed at deploy time by SSH-script workflows. Fetched from consumer workflows via `curl`, executed on the deploy target (VPS).
+
+For admin / local-execution scripts run by a maintainer, see [`../tools/`](../tools/).
 
 ## Available scripts
 
 | Script | Description |
 |---|---|
 | [`wait-for-healthy.sh`](wait-for-healthy.sh) | Poll `docker inspect` for a list of containers until all report `healthy`, or timeout (with optional log dump on failure) |
-| [`sync-infisical-config.sh`](sync-infisical-config.sh) | (Admin) Mirror org-level Infisical secrets/vars to per-repo level. Workaround for GitHub Free org's lack of org-secret cascade to private repos |
-| [`cleanup-areteos-after-prod.sh`](cleanup-areteos-after-prod.sh) | (Admin, post-migration) Delete the redundant per-repo/env secrets in `aretecp/areteos` after both prod and dev workflows finish migrating to Infisical |
-| [`cleanup-arilearn-phx-after-prod.sh`](cleanup-arilearn-phx-after-prod.sh) | (Admin, post-migration) Same idea for `aretecp/arilearn-phx` |
 
 ## Consuming a script in a workflow
 

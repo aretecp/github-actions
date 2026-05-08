@@ -51,9 +51,13 @@ Or pin to a specific version / SHA for stricter reproducibility:
 
 Breaking changes bump the major. The `v1` tag stays on `1.x` forever.
 
-## Shared scripts
+## Shared scripts ([`scripts/`](scripts))
 
-[`scripts/`](scripts) holds bash utilities consumed by SSH-script-based deploy workflows (the GH runner can't reach the VPS's Docker daemon, so these run on the VPS via `curl | bash` at deploy time). See [`scripts/README.md`](scripts/README.md) for the catalog and pinning guidance.
+Runtime utilities consumer workflows fetch via curl + run inside their existing SSH scripts on the deploy target. The GH runner can't reach the VPS's Docker daemon, so these execute on the VPS at deploy time. See [`scripts/README.md`](scripts/README.md).
+
+## Admin tools ([`tools/`](tools))
+
+Maintainer scripts for org-wide GH config — secret syncing, post-migration cleanup. Run locally with `gh` CLI auth, never fetched from a workflow. See [`tools/README.md`](tools/README.md).
 
 ## Releasing
 
