@@ -1,0 +1,162 @@
+name: Load Infisical Secrets
+description: >-
+  Fetches secrets from Areté's Infisical instance via Universal Auth and exports
+  them to subsequent workflow steps as env vars (default) or as a JSON output.
+
+# When bumping the upstream Infisical/secrets-action SHA, also bump this action's
+# major version per the policy in CONTRIBUTING.md if any caller-visible behavior
+# changes (input/output shape, defaults). Internal upstream patches are minor or
+# patch bumps.
+
+inputs:
+  project-slug:
+    description: >-
+      Infisical project slug (e.g. `arete-platform`). NOT the project UUID.
+      Find it in the Infisical UI under Project Settings.
+    required: true
+
+  environment:
+    description: >-
+      Infisical environment slug (e.g. `prod`, `staging`, `dev`). Maps to
+      upstream `env-slug`.
+    required: true
+
+  path:
+    description: Folder path within the project. Defaults to root.
+    required: false
+    default: /
+
+  client-id:
+    description: >-
+      Infisical Universal Auth client ID. Pass `${{ secrets.INFISICAL_CLIENT_ID }}`
+      from the org-level secret.
+    required: true
+
+  client-secret:
+    description: >-
+      Infisical Universal Auth client secret. Pass
+      `${{ secrets.INFISICAL_CLIENT_SECRET }}` from the org-level secret. Masked
+      automatically by GitHub when sourced from `secrets.*`.
+    required: true
+
+  export-as-env:
+    description: >-
+      `'true'` (default) exports each resolved secret as an env var available to
+      subsequent steps. `'false'` skips env export and emits the resolved
+      secrets as a JSON map on the `secrets` output.
+    required: false
+    default: 'true'
+
+  recursive:
+    description: >-
+      `'true'` fetches secrets at the given path AND all subpaths. Defaults to
+      `'false'` (path only).
+    required: false
+    default: 'false'
+
+  include-imports:
+    description: >-
+      `'true'` follows Infisical env-import links (e.g. `prod` env importing
+      from a `shared` project). Defaults to `'true'`.
+    required: false
+    default: 'true'
+
+  domain:
+    description: >-
+      Infisical instance URL. Defaults to Areté's self-hosted instance. Override
+      to target Infisical Cloud (`https://app.infisical.com`) or another
+      instance.
+    required: false
+    default: https://secrets.areteintelligence.ai
+
+outputs:
+  secrets:
+    description: >-
+      JSON map of resolved secrets ({"NAME": "value", ...}). Set only when
+      `export-as-env: 'false'`. Each value is masked via `::add-mask::` before
+      the output is set.
+    value: ${{ steps.json.outputs.secrets }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch secrets (env mode)
+      if: ${{ inputs.export-as-env == 'true' }}
+      uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
+      with:
+        method: universal
+        client-id: ${{ inputs.client-id }}
+        client-secret: ${{ inputs.client-secret }}
+        project-slug: ${{ inputs.project-slug }}
+        env-slug: ${{ inputs.environment }}
+        secret-path: ${{ inputs.path }}
+        domain: ${{ inputs.domain }}
+        recursive: ${{ inputs.recursive }}
+        include-imports: ${{ inputs.include-imports }}
+        export-type: env
+
+    - name: Fetch secrets (file mode)
+      if: ${{ inputs.export-as-env != 'true' }}
+      uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
+      with:
+        method: universal
+        client-id: ${{ inputs.client-id }}
+        client-secret: ${{ inputs.client-secret }}
+        project-slug: ${{ inputs.project-slug }}
+        env-slug: ${{ inputs.environment }}
+        secret-path: ${{ inputs.path }}
+        domain: ${{ inputs.domain }}
+        recursive: ${{ inputs.recursive }}
+        include-imports: ${{ inputs.include-imports }}
+        export-type: file
+        file-output-path: ${{ runner.temp }}/load-infisical-secrets.env
+
+    - name: Convert .env to JSON output
+      id: json
+      if: ${{ inputs.export-as-env != 'true' }}
+      shell: bash
+      env:
+        SECRETS_FILE: ${{ runner.temp }}/load-infisical-secrets.env
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$SECRETS_FILE" ]]; then
+          echo "::error::Expected secrets file not found at $SECRETS_FILE"
+          exit 1
+        fi
+
+        # Parse KEY=VALUE lines into a JSON object. Handles values that are
+        # double-quoted by upstream (.env style). Single-line values only;
+        # multi-line secrets (PEM keys, etc.) are not supported with
+        # export-as-env=false in this version.
+        json=$(jq -Rs '
+          [ split("\n")[]
+            | select(test("^[A-Za-z_][A-Za-z0-9_]*="))
+            | capture("^(?<k>[A-Za-z_][A-Za-z0-9_]*)=(?<v>.*)$")
+            | { key: .k,
+                value: ( if (.v | startswith("\"") and endswith("\"")) and (.v | length) >= 2
+                         then (.v | fromjson)
+                         else .v
+                         end ) }
+          ] | from_entries
+        ' < "$SECRETS_FILE")
+
+        # Defensively mask each value (idempotent if upstream already did).
+        # Reading values via jq -r so we don't echo them through bash interpolation.
+        while IFS= read -r v; do
+          [[ -n "$v" ]] && echo "::add-mask::$v"
+        done < <(printf '%s' "$json" | jq -r '.[] | tostring')
+
+        # Mask the JSON blob too — it contains every value concatenated.
+        echo "::add-mask::$json"
+
+        # Emit as a multi-line step output via heredoc-style delimiter.
+        delim="EOF_$(openssl rand -hex 12)"
+        {
+          echo "secrets<<$delim"
+          printf '%s\n' "$json"
+          echo "$delim"
+        } >> "$GITHUB_OUTPUT"
+
+        # Best-effort cleanup. The runner is ephemeral but be tidy.
+        rm -f "$SECRETS_FILE"
