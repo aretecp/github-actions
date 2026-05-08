@@ -17,11 +17,10 @@ Pin to the moving major tag for non-breaking updates:
 ```yaml
 - uses: aretecp/github-actions/actions/load-infisical-secrets@v1
   with:
-    project-id: ${{ vars.INFISICAL_PROJECT_ID }}
+    project-slug: arete-platform
     environment: prod
-  env:
-    INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-    INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+    client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+    client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
 ```
 
 Or pin to a specific version / SHA for stricter reproducibility:
