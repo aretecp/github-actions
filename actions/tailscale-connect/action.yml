@@ -1,0 +1,36 @@
+name: Tailscale Connect (Areté)
+description: >-
+  Join the Areté Tailscale tailnet. Wraps tailscale/github-action with a
+  pinned SHA and Areté defaults so version bumps and any auth-method
+  migration go through code review here, once, instead of being scattered
+  across 14+ workflows.
+
+# When bumping the upstream tailscale/github-action SHA, also bump this
+# action's major version per the policy in CONTRIBUTING.md if any
+# caller-visible behavior changes (input names/defaults). The current pin
+# corresponds to the v3 moving tag at the time of authoring.
+
+inputs:
+  authkey:
+    description: >-
+      Tailscale auth key. Pass `secrets.TAILSCALE_AUTHKEY` from the
+      consumer repo's secret store.
+    required: true
+  version:
+    description: >-
+      Tailscale CLI version to install. Defaults to a version known
+      compatible with the pinned upstream action SHA.
+    required: false
+    default: '1.80.0'
+
+runs:
+  using: composite
+  steps:
+    - name: Join Tailscale
+      # v3 (resolved at time of authoring). Pinned by SHA to make upstream
+      # bumps explicit. Use OAuth client/secret instead of authkey when
+      # we migrate (see CONTRIBUTING.md auth migration note).
+      uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade
+      with:
+        authkey: ${{ inputs.authkey }}
+        version: ${{ inputs.version }}
