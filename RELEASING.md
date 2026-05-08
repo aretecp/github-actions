@@ -40,73 +40,55 @@ Once the version is chosen, the rest is mechanical.
 
 ## Procedure
 
-Run from a clean local `main` checked out at the commit you want to release.
+Releases are cut via the **Release** workflow (`.github/workflows/release.yml`). No terminal commands required.
+
+### Sanity check (optional but recommended)
+
+Before clicking the button, glance at what's in the release:
 
 ```bash
-# 1. Make sure local main is up to date
-git checkout main
-git pull origin main
-
-# 2. Sanity-check what's in this release
-git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || echo '')..HEAD
-# → review the commits; confirm they match your bump rationale
+git fetch origin --tags
+git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || echo '')..origin/main
 ```
 
-### 1. Annotated version tag
+Pick a version that matches the bump rules above.
+
+### Cut the release
+
+1. Go to **Actions → Release** → **Run workflow** in the GitHub UI.
+2. Fill in:
+   - **Branch:** `main`
+   - **Version:** the new version (e.g. `v1.0.1`, `v2.0.0`, `v2.0.0-rc.1`)
+   - **Update moving major tag:** ✅ checked for stable releases. **Uncheck for pre-releases** (`-rc`, `-beta`, etc.) — pre-releases shouldn't advance `vN`.
+3. Click **Run workflow**.
+
+The workflow:
+1. Validates the version format (`vMAJOR.MINOR.PATCH` with optional `-prerelease`)
+2. Verifies the tag doesn't already exist
+3. Creates the annotated `vX.Y.Z` tag and pushes it
+4. Force-updates the moving `vX` tag (unless skipped)
+5. Creates a GitHub Release with auto-generated notes (pre-releases marked as such)
+6. Posts a step-summary with links
+
+### Manual fallback
+
+If the workflow is broken or unavailable, the manual procedure is:
 
 ```bash
-VERSION=v1.0.0   # set to the version you're cutting
+VERSION=v1.0.1   # the version you're cutting
+MAJOR=v1         # major component
 
-git tag -a "$VERSION" -m "$VERSION"
-git push origin "$VERSION"
+git checkout main && git pull origin main
+git tag -a "$VERSION" -m "$VERSION" && git push origin "$VERSION"
+git tag -fa "$MAJOR" -m "Tracking $MAJOR.x" && git push --force origin "$MAJOR"
+gh release create "$VERSION" --title "$VERSION" --generate-notes
 ```
 
-The annotated `vX.Y.Z` tag is **immutable** once pushed. Don't rewrite it. If you cut a wrong version, cut the next patch — never amend a published tag.
+The `--force` on `$MAJOR` is intentional — see the warning under "Moving major tag" below.
 
-### 2. Moving major tag
+### Moving major tag — the one legitimate force-push
 
-```bash
-MAJOR=v1   # the major component of $VERSION
-
-# Create or move the major tag to the same commit
-git tag -fa "$MAJOR" -m "Tracking $MAJOR.x"
-git push --force origin "$MAJOR"
-```
-
-> **The `--force` is intentional.** The `vX` moving tag is the *one* legitimate force operation in this repo. Every future patch and minor under the same major requires repeating this step to advance `vX` to the new annotated tag. Future contributors should not interpret it as a mistake or push for `--no-force` policies on tags.
-
-### 3. GitHub Release
-
-Generate release notes (or write them by hand for v1.0.0):
-
-```bash
-# auto-generate from commit history since the previous tag
-gh release create "$VERSION" \
-  --title "$VERSION" \
-  --generate-notes
-```
-
-For a hand-curated release (recommended for `v1.0.0`):
-
-```bash
-# Write notes to a file first
-cat > /tmp/release-notes-$VERSION.md <<'NOTES'
-## Highlights
-- ...
-
-## Actions in this release
-- `load-infisical-secrets@$VERSION` — ...
-
-## Breaking changes
-- None (or list them with migration steps)
-NOTES
-
-gh release create "$VERSION" \
-  --title "$VERSION" \
-  --notes-file /tmp/release-notes-$VERSION.md
-```
-
-A GitHub Release also creates a downloadable `.zip`/`.tar.gz` of the source — that's automatic; consumers won't typically use them since they pin via `uses:` refs.
+The `vX` moving tag is the **only** force operation in this repo. Every patch and minor under the same major requires advancing `vX` to the new annotated tag. The release workflow handles this automatically; the manual fallback does it explicitly. Future contributors should not interpret it as a mistake or push for `--no-force` policies on tags.
 
 ## Post-release
 

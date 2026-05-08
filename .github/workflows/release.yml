@@ -1,0 +1,114 @@
+name: Release
+
+# Manual release trigger. Click "Run workflow" in the Actions UI, type the
+# version (e.g. v1.0.0), choose whether to advance the moving major tag,
+# and the workflow handles the rest:
+#   1. Validates the version format
+#   2. Creates the annotated `vX.Y.Z` tag and pushes it
+#   3. Force-updates the moving `vX` tag (unless skipped — useful for
+#      pre-releases like `v2.0.0-rc.1`)
+#   4. Creates a GitHub Release with auto-generated notes
+#
+# RELEASING.md documents the full procedure and bump-rule reference.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v1.0.1, v2.0.0-rc.1)"
+        required: true
+        type: string
+      update-major-tag:
+        description: "Force-update the moving major tag (v1, v2, ...). Uncheck for pre-releases."
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Version must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE (e.g. v1.0.0, v1.0.1, v2.0.0-rc.1). Got: '$VERSION'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Verify tag does not already exist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q "$VERSION"; then
+            echo "::error::Tag $VERSION already exists on origin. To re-cut, bump to the next patch."
+            exit 1
+          fi
+
+      - name: Tag the release commit
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+      - name: Update moving major tag
+        if: inputs.update-major-tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          MAJOR=$(echo "$VERSION" | grep -oE '^v[0-9]+')
+          if [[ -z "$MAJOR" ]]; then
+            echo "::error::Could not extract major component from $VERSION"
+            exit 1
+          fi
+          git tag -fa "$MAJOR" -m "Tracking $MAJOR.x"
+          git push --force origin "$MAJOR"
+          echo "::notice::Moving tag $MAJOR now points at $VERSION"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          IS_PRERELEASE: ${{ contains(inputs.version, '-') }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --generate-notes \
+            $PRERELEASE_FLAG
+
+      - name: Summary
+        env:
+          VERSION: ${{ inputs.version }}
+          UPDATE_MAJOR: ${{ inputs.update-major-tag }}
+        run: |
+          {
+            echo "## Released $VERSION"
+            echo ""
+            echo "- **Annotated tag:** \`$VERSION\` (immutable)"
+            if [[ "$UPDATE_MAJOR" == "true" ]]; then
+              MAJOR=$(echo "$VERSION" | grep -oE '^v[0-9]+')
+              echo "- **Moving major tag:** \`$MAJOR\` advanced to \`$VERSION\`"
+            else
+              echo "- **Moving major tag:** not updated (pre-release or explicit skip)"
+            fi
+            echo "- **GitHub Release:** [$VERSION](${{ github.server_url }}/${{ github.repository }}/releases/tag/$VERSION)"
+            echo ""
+            echo "Consumers pinned to \`@$(echo "$VERSION" | grep -oE '^v[0-9]+')\` will pick this up automatically on their next workflow run."
+          } >> "$GITHUB_STEP_SUMMARY"
