@@ -1,0 +1,80 @@
+name: Bug report
+description: Something is broken in one of the shared actions
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: action
+    attributes:
+      label: Which action?
+      description: The composite action this bug is about
+      options:
+        - load-infisical-secrets
+        - other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Action version
+      description: The ref you're using (e.g. `v1`, `v1.0.0`, or a commit SHA)
+      placeholder: v1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner OS
+      options:
+        - ubuntu-latest
+        - ubuntu-22.04
+        - ubuntu-24.04
+        - macos-latest
+        - macos-14
+        - macos-15
+        - windows-latest
+        - self-hosted
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow-snippet
+    attributes:
+      label: Workflow snippet
+      description: The relevant `uses:` block and any inputs/env you passed. Redact secrets.
+      render: yaml
+      placeholder: |
+        - uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+          with:
+            project-id: ${{ vars.INFISICAL_PROJECT_ID }}
+            environment: prod
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the failing step's output. Redact any secrets.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Other context — recent changes, related issues, etc.
+    validations:
+      required: false

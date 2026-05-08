@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a new shared action, or a new input/behavior on an existing one
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type of request
+      options:
+        - New composite action
+        - New input or option on an existing action
+        - Behavior change on an existing action
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: action
+    attributes:
+      label: Action name
+      description: For an existing action, which one? For a new one, what would you call it?
+      placeholder: e.g. tailscale-connect, slack-notify, load-infisical-secrets
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you doing today across repos that this would replace?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: Sketch the inputs, outputs, and a sample `uses:` block. Doesn't need to be final.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing actions, inline workflow steps, or other approaches you ruled out.
+    validations:
+      required: false
+
+  - type: input
+    id: consumers
+    attributes:
+      label: Which repos would use this?
+      placeholder: e.g. areteos, bd-pulse, internal-tools
+    validations:
+      required: false
