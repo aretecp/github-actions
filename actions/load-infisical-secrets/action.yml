@@ -28,15 +28,15 @@ inputs:
 
   client-id:
     description: >-
-      Infisical Universal Auth client ID. Pass `${{ secrets.INFISICAL_CLIENT_ID }}`
-      from the org-level secret.
+      Infisical Universal Auth client ID. Caller passes the org-level secret
+      INFISICAL_CLIENT_ID from secrets context.
     required: true
 
   client-secret:
     description: >-
-      Infisical Universal Auth client secret. Pass
-      `${{ secrets.INFISICAL_CLIENT_SECRET }}` from the org-level secret. Masked
-      automatically by GitHub when sourced from `secrets.*`.
+      Infisical Universal Auth client secret. Caller passes the org-level
+      secret INFISICAL_CLIENT_SECRET from secrets context. Masked automatically
+      by GitHub when sourced via the secrets context.
     required: true
 
   export-as-env:
