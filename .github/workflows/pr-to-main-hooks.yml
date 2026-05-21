@@ -17,9 +17,20 @@ name: PR to main — hooks (shared)
 # `synchronize` events (which fire on every push) so we don't re-post
 # the card on every commit.
 #
-# Required secrets (caller forwards via `secrets:` block):
-#   ANTHROPIC_API_KEY            — Claude summary
-#   TEAMS_PR_NOTIFY_WEBHOOK_URL  — Teams card destination
+# Two authentication paths for ANTHROPIC_API_KEY and
+# TEAMS_PR_NOTIFY_WEBHOOK_URL (mutually exclusive):
+#
+#   1. OIDC (preferred — no stored credentials in consumer repos):
+#      Caller provides `infisical-identity-id` plus app- and shared-source
+#      inputs. The workflow loads both secrets from Infisical via short-
+#      lived GitHub OIDC token at run time. ANTHROPIC_API_KEY comes from
+#      the app project (e.g. arete-internal/<env>/<repo-path>);
+#      TEAMS_PR_NOTIFY_WEBHOOK_URL comes from the shared project (default
+#      arete-shared/<env>/teams/pr-notify).
+#
+#   2. Forwarded secrets (legacy — still works for backward compat):
+#      Caller forwards both secrets via `secrets:` block. Used when
+#      the caller hasn't migrated to OIDC yet.
 #
 # Auto-provided to reusable workflows:
 #   GITHUB_TOKEN — PR body update + issue lookups
@@ -31,7 +42,8 @@ on:
         description: >-
           Job environment scope. Required for env-level secret access in
           private repos on GitHub Free. Default `production` matches where
-          ANTHROPIC_API_KEY and TEAMS_PR_NOTIFY_WEBHOOK_URL typically live.
+          legacy GH-stored secrets typically live; OIDC callers can leave
+          as default.
         required: false
         type: string
         default: production
@@ -40,13 +52,51 @@ on:
         required: false
         type: string
         default: claude-sonnet-4-6
+
+      # --- OIDC path (preferred) ---
+      infisical-identity-id:
+        description: 'Infisical OIDC machine identity UUID. When set, the workflow loads secrets via OIDC instead of expecting forwarded secrets.'
+        required: false
+        type: string
+        default: ''
+      infisical-app-project-slug:
+        description: 'Infisical project for ANTHROPIC_API_KEY (e.g. arete-internal). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-app-env:
+        description: 'Infisical environment slug for the app secrets (dev/prod). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-app-path:
+        description: 'Infisical path containing ANTHROPIC_API_KEY (e.g. /areteos). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-shared-project-slug:
+        description: 'Infisical project for TEAMS_PR_NOTIFY_WEBHOOK_URL.'
+        required: false
+        type: string
+        default: arete-shared
+      infisical-shared-env:
+        description: 'Infisical environment slug for the shared secrets. Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-shared-path:
+        description: 'Infisical path containing TEAMS_PR_NOTIFY_WEBHOOK_URL.'
+        required: false
+        type: string
+        default: /teams/pr-notify
+
     secrets:
       ANTHROPIC_API_KEY:
-        description: 'Anthropic API key for the Claude summary step.'
-        required: true
+        description: 'Anthropic API key. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
+        required: false
       TEAMS_PR_NOTIFY_WEBHOOK_URL:
-        description: 'Teams Workflow incoming webhook URL for PR notifications.'
-        required: true
+        description: 'Teams Workflow incoming webhook URL. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
+        required: false
 
 jobs:
   link-issues:
@@ -56,11 +106,32 @@ jobs:
       contents: read
       pull-requests: write
       issues: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
+        if: inputs.infisical-identity-id != '' && inputs.infisical-app-project-slug != ''
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.infisical-app-project-slug }}
+          environment: ${{ inputs.infisical-app-env }}
+          path: ${{ inputs.infisical-app-path }}
+
+      - name: Load TEAMS_PR_NOTIFY_WEBHOOK_URL from Infisical (OIDC)
+        if: inputs.infisical-identity-id != '' && inputs.infisical-shared-project-slug != ''
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.infisical-shared-project-slug }}
+          environment: ${{ inputs.infisical-shared-env }}
+          path: ${{ inputs.infisical-shared-path }}
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest
@@ -122,7 +193,9 @@ jobs:
 
       - name: Generate PR summary with Claude
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # OIDC-loaded env.ANTHROPIC_API_KEY wins if present; falls back to
+          # forwarded secret for callers that haven't migrated to OIDC yet.
+          ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY || secrets.ANTHROPIC_API_KEY }}
           CLAUDE_MODEL: ${{ inputs.claude-model }}
         run: |
           set -euo pipefail
@@ -264,7 +337,9 @@ jobs:
           PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WEBHOOK: ${{ secrets.TEAMS_PR_NOTIFY_WEBHOOK_URL }}
+          # OIDC-loaded env.TEAMS_PR_NOTIFY_WEBHOOK_URL wins if present;
+          # falls back to forwarded secret for legacy callers.
+          WEBHOOK: ${{ env.TEAMS_PR_NOTIFY_WEBHOOK_URL || secrets.TEAMS_PR_NOTIFY_WEBHOOK_URL }}
         run: |
           set -euo pipefail
 
