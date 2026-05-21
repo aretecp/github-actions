@@ -143,12 +143,16 @@ jobs:
           git push origin "$VERSION"
 
       - name: Update moving major tag
-        # Skip if explicitly disabled OR if this is a pre-release.
-        # `inputs.update-major-tag` is null on push events — `!= false`
-        # treats null as "yes, advance".
+        # On push: always advance (push events have no `inputs`, and
+        # GHA coerces null/false the same way — so `!= false` evaluates
+        # false on push and incorrectly skips this step. Check the event
+        # name explicitly instead).
+        # On workflow_dispatch: respect the input (defaults to true;
+        # user can uncheck for pre-releases).
+        # Pre-release versions (containing `-`) never advance the major.
         if: |
           steps.version.outputs.skip != 'true' &&
-          inputs.update-major-tag != false &&
+          (github.event_name == 'push' || inputs.update-major-tag) &&
           !contains(steps.version.outputs.version, '-')
         env:
           VERSION: ${{ steps.version.outputs.version }}
