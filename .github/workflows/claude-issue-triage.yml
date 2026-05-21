@@ -9,8 +9,16 @@ name: Claude Issue Triage (shared)
 # so it stays in sync across all consumers automatically — bump the prompt
 # here, all consumers pick it up on the next workflow run.
 #
-# Required secrets (caller must forward via `secrets:` block or `secrets: inherit`):
-#   ANTHROPIC_API_KEY — Claude API access
+# Two authentication paths for ANTHROPIC_API_KEY (mutually exclusive):
+#
+#   1. OIDC (preferred — no stored credentials in consumer repos):
+#      Caller provides `infisical-identity-id`, `infisical-project-slug`,
+#      `infisical-env`, `infisical-path`. The workflow loads ANTHROPIC_API_KEY
+#      from Infisical via short-lived GitHub OIDC token at run time.
+#
+#   2. Forwarded secret (legacy — still works for backward compat):
+#      Caller forwards ANTHROPIC_API_KEY via `secrets:` block. Used when
+#      the caller hasn't migrated to OIDC yet.
 #
 # Auto-provided to reusable workflows:
 #   GITHUB_TOKEN — issue comment + label updates
@@ -38,10 +46,33 @@ on:
         required: false
         type: string
         default: claude-sonnet-4-6
+
+      # --- OIDC path (preferred) ---
+      infisical-identity-id:
+        description: 'Infisical OIDC machine identity UUID. When set, the workflow loads ANTHROPIC_API_KEY via OIDC instead of expecting it as a forwarded secret.'
+        required: false
+        type: string
+        default: ''
+      infisical-project-slug:
+        description: 'Infisical project containing ANTHROPIC_API_KEY (e.g. arete-internal). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-env:
+        description: 'Infisical environment slug (dev/prod). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+      infisical-path:
+        description: 'Infisical path containing ANTHROPIC_API_KEY (e.g. /areteos). Required when infisical-identity-id is set.'
+        required: false
+        type: string
+        default: ''
+
     secrets:
       ANTHROPIC_API_KEY:
-        description: 'Anthropic API key for Claude.'
-        required: true
+        description: 'Anthropic API key. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
+        required: false
 
 jobs:
   triage:
@@ -68,6 +99,16 @@ jobs:
           repository: aretecp/github-actions
           ref: ${{ inputs.shared-ref }}
           path: .shared-actions
+
+      - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
+        if: inputs.infisical-identity-id != ''
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.infisical-project-slug }}
+          environment: ${{ inputs.infisical-env }}
+          path: ${{ inputs.infisical-path }}
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest
@@ -123,7 +164,9 @@ jobs:
 
       - name: Run Claude triage
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # OIDC-loaded env.ANTHROPIC_API_KEY wins if present; falls back to
+          # forwarded secret for callers that haven't migrated to OIDC yet.
+          ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY || secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLAUDE_MODEL: ${{ inputs.claude-model }}
         run: |
