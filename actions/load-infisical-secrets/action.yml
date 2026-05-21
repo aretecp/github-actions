@@ -26,18 +26,42 @@ inputs:
     required: false
     default: /
 
+  method:
+    description: >-
+      Authentication method. `universal` (default) uses
+      client-id/client-secret. `oidc` uses a short-lived GitHub OIDC token
+      exchanged for an Infisical access token at workflow runtime — no
+      stored Infisical credentials. Caller must declare
+      `permissions: id-token: write` on the job when using `oidc`.
+      `aws-iam` passes through to upstream for completeness.
+    required: false
+    default: universal
+
   client-id:
     description: >-
-      Infisical Universal Auth client ID. Caller passes the org-level secret
-      INFISICAL_CLIENT_ID from secrets context.
-    required: true
+      Universal Auth client ID. Required when method=universal. Pass the
+      INFISICAL_CLIENT_ID secret from the caller's context.
+    required: false
 
   client-secret:
     description: >-
-      Infisical Universal Auth client secret. Caller passes the org-level
-      secret INFISICAL_CLIENT_SECRET from secrets context. Masked automatically
-      by GitHub when sourced via the secrets context.
-    required: true
+      Universal Auth client secret. Required when method=universal. Pass the
+      INFISICAL_CLIENT_SECRET secret from the caller's context.
+    required: false
+
+  identity-id:
+    description: >-
+      Infisical OIDC machine identity UUID. Required when method=oidc. Get
+      it from the Infisical UI under Identities. Safe to store as a repo or
+      org variable (not a secret).
+    required: false
+
+  oidc-audience:
+    description: >-
+      Custom audience claim for the GitHub OIDC token. Optional even when
+      method=oidc; defaults to upstream's default audience. Set if your
+      Infisical OIDC identity expects a specific audience string.
+    required: false
 
   export-as-env:
     description: >-
@@ -84,9 +108,11 @@ runs:
       if: ${{ inputs.export-as-env == 'true' }}
       uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
       with:
-        method: universal
+        method: ${{ inputs.method }}
         client-id: ${{ inputs.client-id }}
         client-secret: ${{ inputs.client-secret }}
+        identity-id: ${{ inputs.identity-id }}
+        oidc-audience: ${{ inputs.oidc-audience }}
         project-slug: ${{ inputs.project-slug }}
         env-slug: ${{ inputs.environment }}
         secret-path: ${{ inputs.path }}
@@ -99,9 +125,11 @@ runs:
       if: ${{ inputs.export-as-env != 'true' }}
       uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
       with:
-        method: universal
+        method: ${{ inputs.method }}
         client-id: ${{ inputs.client-id }}
         client-secret: ${{ inputs.client-secret }}
+        identity-id: ${{ inputs.identity-id }}
+        oidc-audience: ${{ inputs.oidc-audience }}
         project-slug: ${{ inputs.project-slug }}
         env-slug: ${{ inputs.environment }}
         secret-path: ${{ inputs.path }}
