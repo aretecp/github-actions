@@ -34,6 +34,19 @@ name: PR to main — hooks (shared)
 #
 # Auto-provided to reusable workflows:
 #   GITHUB_TOKEN — PR body update + issue lookups
+#
+# REQUIRED CALLER PERMISSIONS
+# ---------------------------
+# The job below requests these permissions. GHA reusable workflows can
+# only USE permissions the caller has GRANTED — without this block the
+# call fails at startup with "is requesting '...', but is only allowed
+# '...'". Copy verbatim into the calling shim (at workflow or job level):
+#
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     issues: read
+#     id-token: write   # only required when using the OIDC auth path
 
 on:
   workflow_call:
