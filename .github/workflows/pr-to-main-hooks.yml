@@ -126,16 +126,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
-        if: inputs.infisical-identity-id != '' && inputs.infisical-app-project-slug != ''
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
-        with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.infisical-app-project-slug }}
-          environment: ${{ inputs.infisical-app-env }}
-          path: ${{ inputs.infisical-app-path }}
-
+      # Load shared infra secrets FIRST so app-project keys (loaded next) can
+      # override any collisions. Each load writes to $GITHUB_ENV last-write-wins,
+      # so project-specific values are the authoritative layer.
       - name: Load TEAMS_PR_NOTIFY_WEBHOOK_URL from Infisical (OIDC)
         if: inputs.infisical-identity-id != '' && inputs.infisical-shared-project-slug != ''
         uses: aretecp/github-actions/actions/load-infisical-secrets@v1
@@ -145,6 +138,16 @@ jobs:
           project-slug: ${{ inputs.infisical-shared-project-slug }}
           environment: ${{ inputs.infisical-shared-env }}
           path: ${{ inputs.infisical-shared-path }}
+
+      - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
+        if: inputs.infisical-identity-id != '' && inputs.infisical-app-project-slug != ''
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.infisical-app-project-slug }}
+          environment: ${{ inputs.infisical-app-env }}
+          path: ${{ inputs.infisical-app-path }}
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest
