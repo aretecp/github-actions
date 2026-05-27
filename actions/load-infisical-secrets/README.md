@@ -99,6 +99,40 @@ project-slug: ${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}
 project-slug: arete-internal
 ```
 
+### Layering multiple loads (shared + project-specific)
+
+A workflow that loads from both a shared project (`arete-shared`) **and** a project-specific project (`arete-internal`, `arete-external`, ...) writes to the same `$GITHUB_ENV`. The action exports each resolved secret with `core.exportVariable`, so **the last load to write a given key wins**.
+
+If `arete-shared` is loaded **recursively** at `/`, its subfolders may contain keys with the same name as project-specific keys (e.g. `arete-shared/terraform/entra/MICROSOFT_CLIENT_ID` vs `arete-internal/<your-app>/MICROSOFT_CLIENT_ID`). To avoid a shared-infra key silently shadowing your project's value, **load the shared project first and the project-specific project second**:
+
+```yaml
+steps:
+  # 1. Shared first — applies org-wide defaults and cross-cutting infra
+  - name: Load shared infra secrets from Infisical (OIDC)
+    uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+    with:
+      method: oidc
+      identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      project-slug: ${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}
+      environment: prod
+      path: /
+      recursive: true
+
+  # 2. Project-specific second — overrides any collisions from shared
+  - name: Load app secrets from Infisical (OIDC)
+    uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+    with:
+      method: oidc
+      identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+      environment: prod
+      path: /<your-app>
+```
+
+Rationale: project-specific values are always more authoritative than shared defaults. This ordering survives future collisions automatically — any new key added to a shared subfolder won't shadow your repo's value if you've already declared it in the project path.
+
+If you only need keys at the **root** of the shared project (i.e. you don't need anything under its subfolders), drop `recursive: true` on the shared step. With no recursion, collisions with subfolder keys are impossible regardless of order — but the shared-first convention is still recommended so the rule "project last wins" stays consistent across all your workflows.
+
 ### JSON output mode (no env pollution)
 
 ```yaml
