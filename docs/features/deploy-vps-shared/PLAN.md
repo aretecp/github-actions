@@ -49,8 +49,8 @@ No `secrets:` block — OIDC. Caller grants `id-token: write`, `contents: read`.
 | `actions/load-infisical-secrets/README.md` | Document dotenv mode + multi-line limitation | Consumer guidance |
 | `README.md` | Document v2 action mode + reusable deploy workflow + v1-frozen note | Discoverability |
 | `docs/runbooks/deploy-vps-migration.md` (new) | Per-repo migration runbook (Infisical restructure → verify → flip shim → deploy) | Repeatable, ordering-safe migration |
-| `aretecp/areteos` `deploy-dev.yml` / `deploy-prod.yml` | Replace heredoc jobs with ~15-line shims calling `deploy-vps-shared.yml@v2` | Reference migration |
-| areteos Infisical folders | Restructure: imports, standardized infra folder, non-secret config moved in | Folder export = complete `.env` |
+| `aretecp/bd-pulse` `deploy-dev.yml` / `deploy-prod.yml` | Replace heredoc jobs with ~15-line shims calling `deploy-vps-shared.yml@v2` | **Pilot** reference migration |
+| bd-pulse Infisical folders | Restructure: imports, point at `/tailscale` infra folder, non-secret config moved in | Folder export = complete `.env` |
 
 Existing precedent for the shim + permissions-documentation header is `.github/workflows/release-shared.yml` (see its `REQUIRED CALLER PERMISSIONS` block, lines 19-30). The action's single-line-only render limitation is documented at `actions/load-infisical-secrets/action.yml` lines 156-159.
 
@@ -80,20 +80,22 @@ Existing precedent for the shim + permissions-documentation header is `.github/w
 ### Phase 4 — Release
 - [ ] Cut v2 per RELEASING.md (major bump). Confirm `@v1` moving tag stays frozen.
 
-### Phase 5 — areteos reference migration (sequenced)
-- [ ] **Restructure Infisical first**: add imports, create standardized infra folder, move non-secret config (PHX_HOST*, EMAIL_FROM_ADDRESS, ENVIRONMENT, LANGFUSE_HOST, AUDIT_RETENTION_DAYS) into the app folder. Must land BEFORE the shim flips, or the first v2 deploy comes up with a half-empty `.env`.
-- [ ] Confirm areteos app folder has **no multi-line secrets** (PEM keys) — dotenv render does not support them.
+### Phase 5 — bd-pulse reference migration (PILOT, sequenced)
+> Pilot repo changed from areteos → **bd-pulse** (smaller blast radius for the first real v2 deploy). areteos becomes a follow-up.
+- [ ] Inspect bd-pulse's current `deploy-dev.yml`/`deploy-prod.yml` heredoc to enumerate its app secrets + non-secret config (bd-pulse-specific, not the areteos set).
+- [ ] **Restructure Infisical first**: add imports for any shared deps, point at the standardized `/tailscale` infra folder, move bd-pulse's non-secret config into its app folder. Must land BEFORE the shim flips, or the first v2 deploy comes up with a half-empty `.env`.
+- [ ] Confirm bd-pulse app folder has **no multi-line secrets** (PEM keys) — dotenv render does not support them.
 - [ ] Dry-run / verify export of the app folder matches the current heredoc `.env`.
-- [ ] Flip `deploy-dev.yml` to the v2 shim → deploy dev → verify running `.env` and healthchecks.
+- [ ] Flip `deploy-dev.yml` to the v2 shim → deploy dev → verify running `.env` + healthchecks. **Confirm the scp/`strip_components` landing here — #1 risk.**
 - [ ] Flip `deploy-prod.yml` to the v2 shim → deploy prod → verify.
 
 ### Phase 6 — Follow-up (fast-follow, not deferred)
-- [ ] File migration issues for ms-365-mcp-server, arilearn-phx, bd-pulse (same restructure→shim sequence, each gated on a no-multi-line-secrets check).
+- [ ] File migration issues for **areteos**, ms-365-mcp-server, arilearn-phx (same restructure→shim sequence, each gated on a no-multi-line-secrets check) — once bd-pulse proves the path.
 - [ ] Extend the reusable workflow (or a sibling) to cover rollback-prod / copy-prod-db — scheduled soon after the deploy path lands, not "someday".
 
 ## Out of Scope
 - rollback-prod and copy-prod-db coverage in v2 (deploy-from-scratch only first).
-- Migrating ms-365-mcp-server, arilearn-phx, bd-pulse (follow-up issues; areteos is the reference).
+- Migrating areteos, ms-365-mcp-server, arilearn-phx (follow-up issues; **bd-pulse is the pilot**).
 - Touching v1 consumers, the `@v1` tag, or `claude-issues` / `pr-to-main-hooks` (load-only consumers, no deploy pattern).
 - Multi-line secret support in dotenv render (existing limitation carried forward).
 
