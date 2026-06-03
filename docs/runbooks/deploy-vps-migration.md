@@ -168,6 +168,46 @@ Prod shims should NOT include `allow-clone: true`. If the VPS directory is ever 
 
 ---
 
+## Optional inputs — DB backup + compose flags
+
+### Pre-deploy DB backup (first-class, `db-type`)
+
+The shared workflow can snapshot the live DB **before** `compose up` recreates containers, so a bad migration/recreate is recoverable. It no-ops on the first deploy (DB container not running yet) and via `skip-pre-deploy: true` (break-glass).
+
+**SQLite** (e.g. bd-pulse — snapshot lives inside the data volume):
+
+```yaml
+      db-type: sqlite
+      db-container: bd_tracker_api_dev      # the container that mounts the data volume
+      db-path: /app/data/bd_tracker_dev.db
+      # snapshot-dir defaults to <dirname(db-path)>/pre-deploy-snapshots
+      snapshot-retention-days: 7
+      skip-pre-deploy: ${{ inputs.skip_pre_deploy_checks || false }}
+```
+
+**Postgres** (e.g. areteos — `pg_dump` to a host path under `repo-dir`):
+
+```yaml
+      db-type: postgres
+      db-container: areteos_db
+      db-name: areteos_prod
+      db-user: areteos
+      # snapshot-dir defaults to <repo-dir>/pre-deploy-snapshots
+      snapshot-retention-days: 7
+```
+
+> Postgres note: `pg_dump` runs via `docker exec` as `db-user` over the container's local socket. The official images use trust auth for local connections, so no password is needed — verify on first run; if your cluster requires a password, that's a follow-up (pass `PGPASSWORD` into the container).
+
+### Compose flags
+
+| Input | Default | When to set |
+|-------|---------|-------------|
+| `compose-build` | `true` | `false` only if the compose pulls pre-built images instead of building from source |
+| `compose-force-recreate` | `false` | `true` if the compose uses fixed `container_name`s and you hit hash-prefixed container names on redeploy (breaks health-inspect + Traefik routing) |
+| `compose-remove-orphans` | `false` | ⚠️ Leave `false` if Traefik (or anything) runs in a **separate** compose stack on the VPS — `--remove-orphans` would delete it. Only `true` if this compose owns every container on the box |
+
+---
+
 ## Rollback
 
 v2 deploy is currently deploy-from-scratch only. If a deploy produces a broken `.env`:
