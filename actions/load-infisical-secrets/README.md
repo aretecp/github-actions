@@ -151,6 +151,33 @@ If you only need keys at the **root** of the shared project (i.e. you don't need
     api-key: ${{ fromJSON(steps.load.outputs.secrets).STRIPE_KEY }}
 ```
 
+### Dotenv render mode (for VPS deploys)
+
+Renders the entire Infisical folder to a bare `KEY=value` file — no quote-wrapping — suitable for `docker compose --env-file`. Masking is applied to every value. The output file path is exposed on `dotenv-file-path` for use with `appleboy/scp-action` or similar.
+
+```yaml
+- id: load
+  uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+  with:
+    method: oidc
+    identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+    project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+    environment: prod
+    path: /myapp
+    include-imports: 'true'   # folds shared-dep imports into the single render
+    export-as-env: dotenv
+
+- name: SCP env file to VPS
+  uses: appleboy/scp-action@v0.1.7
+  with:
+    source: ${{ steps.load.outputs.dotenv-file-path }}
+    target: /srv/myapp/.env
+    strip_components: 999
+    # ... host/username/key from previously-loaded infra secrets
+```
+
+Note: see [Limitations](#limitations) — multi-line secrets (PEM keys) are not supported in dotenv mode. Run a pre-migration check before flipping any repo to v2.
+
 ## Inputs
 
 | Input | Required | Default | Description |
@@ -163,7 +190,8 @@ If you only need keys at the **root** of the shared project (i.e. you don't need
 | `client-secret` | no¹ | — | Universal Auth client secret. Required when `method=universal`. Pass `${{ secrets.INFISICAL_CLIENT_SECRET }}` |
 | `identity-id` | no¹ | — | Infisical OIDC machine identity UUID. Required when `method=oidc`. Safe to store as a non-secret org variable |
 | `oidc-audience` | no | — | Custom audience claim for the OIDC token. Optional; defaults to upstream's default |
-| `export-as-env` | no | `'true'` | `'true'` writes secrets to `$GITHUB_ENV` for subsequent steps. `'false'` skips env and emits the JSON `secrets` output instead |
+| `export-as-env` | no | `'true'` | `'true'` writes secrets to `$GITHUB_ENV` for subsequent steps. `'false'` skips env and emits the JSON `secrets` output instead. `'dotenv'` writes a bare `KEY=value` file to `dotenv-output-path` (v2+) |
+| `dotenv-output-path` | no | `$RUNNER_TEMP/infisical.env` | Path where the rendered dotenv file is written. Only used when `export-as-env: dotenv`. Exposed as output `dotenv-file-path` |
 | `recursive` | no | `'false'` | `'true'` fetches secrets at the given path AND all subpaths |
 | `include-imports` | no | `'true'` | `'true'` follows Infisical env-import links (e.g. `prod` env importing from a `shared` project) |
 | `domain` | no | `https://secrets.areteintelligence.ai` | Infisical instance URL. Override to target Infisical Cloud (`https://app.infisical.com`) or another instance |
@@ -175,10 +203,12 @@ If you only need keys at the **root** of the shared project (i.e. you don't need
 | Output | Description |
 |---|---|
 | `secrets` | JSON map `{ "NAME": "value", ... }` of resolved secrets. Set **only** when `export-as-env: 'false'`. Each value is masked via `::add-mask::` before the output is set. Parse with `${{ fromJSON(steps.<id>.outputs.secrets).KEY }}` |
+| `dotenv-file-path` | Absolute path to the rendered dotenv file. Set **only** when `export-as-env: 'dotenv'`. Pass to `appleboy/scp-action` `source:` or `docker compose --env-file` |
 
 ## Limitations
 
-- **Multi-line secret values** (PEM keys, certificates with newlines, etc.) are **not supported** when `export-as-env: 'false'`. The `.env`-to-JSON parser is single-line. Use env mode for multi-line values, or open an issue if JSON output for multi-line is needed.
+- **Multi-line secret values** (PEM keys, certificates with newlines, etc.) are **not supported** when `export-as-env: 'false'` or `export-as-env: 'dotenv'`. The `.env` parser is single-line. Use env mode for multi-line values, or open an issue if dotenv/JSON output for multi-line is needed. Before migrating a repo to v2 deploy mode, verify that no app-folder secrets span multiple lines.
+- **`docker compose --env-file` treats quotes literally** — the dotenv render emits bare `KEY=value` with no quote-wrapping specifically to avoid this. Do not manually add quotes to secrets stored in Infisical if they will be consumed via dotenv mode.
 - **`ubuntu-latest` runners only** — relies on `jq` and `bash` being preinstalled. macOS and Windows runners are untested; file an issue if you need them.
 
 ## Bumping the upstream `Infisical/secrets-action` SHA

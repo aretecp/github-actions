@@ -67,9 +67,20 @@ inputs:
     description: >-
       `'true'` (default) exports each resolved secret as an env var available to
       subsequent steps. `'false'` skips env export and emits the resolved
-      secrets as a JSON map on the `secrets` output.
+      secrets as a JSON map on the `secrets` output. `'dotenv'` writes a bare
+      `KEY=value` dotenv file to `dotenv-output-path` (no quote-wrapping —
+      `docker compose --env-file` treats quotes literally). Masking is applied
+      in all modes.
     required: false
     default: 'true'
+
+  dotenv-output-path:
+    description: >-
+      File path where the rendered dotenv file is written when
+      `export-as-env: 'dotenv'`. Defaults to `$RUNNER_TEMP/infisical.env`.
+      Ignored in all other modes.
+    required: false
+    default: ''
 
   recursive:
     description: >-
@@ -101,6 +112,13 @@ outputs:
       the output is set.
     value: ${{ steps.json.outputs.secrets }}
 
+  dotenv-file-path:
+    description: >-
+      Absolute path to the rendered dotenv file. Set only when
+      `export-as-env: 'dotenv'`. Callers can pass this path to
+      `appleboy/scp-action` or `docker compose --env-file`.
+    value: ${{ steps.dotenv.outputs.dotenv-file-path }}
+
 runs:
   using: composite
   steps:
@@ -121,8 +139,8 @@ runs:
         include-imports: ${{ inputs.include-imports }}
         export-type: env
 
-    - name: Fetch secrets (file mode)
-      if: ${{ inputs.export-as-env != 'true' }}
+    - name: Fetch secrets (file mode — JSON output path)
+      if: ${{ inputs.export-as-env == 'false' }}
       uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
       with:
         method: ${{ inputs.method }}
@@ -141,7 +159,7 @@ runs:
 
     - name: Convert .env to JSON output
       id: json
-      if: ${{ inputs.export-as-env != 'true' }}
+      if: ${{ inputs.export-as-env == 'false' }}
       shell: bash
       env:
         SECRETS_FILE: ${{ runner.temp }}/load-infisical-secrets.env
@@ -187,4 +205,87 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
         # Best-effort cleanup. The runner is ephemeral but be tidy.
+        rm -f "$SECRETS_FILE"
+
+    - name: Fetch secrets (file mode — dotenv output path)
+      if: ${{ inputs.export-as-env == 'dotenv' }}
+      uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
+      with:
+        method: ${{ inputs.method }}
+        client-id: ${{ inputs.client-id }}
+        client-secret: ${{ inputs.client-secret }}
+        identity-id: ${{ inputs.identity-id }}
+        oidc-audience: ${{ inputs.oidc-audience }}
+        project-slug: ${{ inputs.project-slug }}
+        env-slug: ${{ inputs.environment }}
+        secret-path: ${{ inputs.path }}
+        domain: ${{ inputs.domain }}
+        recursive: ${{ inputs.recursive }}
+        include-imports: ${{ inputs.include-imports }}
+        export-type: file
+        file-output-path: ${{ runner.temp }}/load-infisical-secrets-dotenv.env
+
+    - name: Render bare dotenv file
+      id: dotenv
+      if: ${{ inputs.export-as-env == 'dotenv' }}
+      shell: bash
+      env:
+        SECRETS_FILE: ${{ runner.temp }}/load-infisical-secrets-dotenv.env
+        DOTENV_OUTPUT_PATH: ${{ inputs.dotenv-output-path }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$SECRETS_FILE" ]]; then
+          echo "::error::Expected secrets file not found at $SECRETS_FILE"
+          exit 1
+        fi
+
+        # Resolve output path: caller-supplied or default under runner.temp.
+        if [[ -z "$DOTENV_OUTPUT_PATH" ]]; then
+          OUT_FILE="$RUNNER_TEMP/infisical.env"
+        else
+          OUT_FILE="$DOTENV_OUTPUT_PATH"
+        fi
+
+        # Render bare KEY=value lines — no quote-wrapping.
+        # docker compose --env-file treats quotes literally, so we strip any
+        # double-quote wrapping that upstream's .env serialiser may have added.
+        # Single-line values only; multi-line secrets (PEM keys, etc.) are not
+        # supported in dotenv mode.
+        #
+        # Parse rules (matching the upstream file format):
+        #   - Skip blank lines and comment lines (# ...)
+        #   - Accept KEY=value and KEY="value" (upstream may quote)
+        #   - Strip surrounding double-quotes from value if present
+        #   - Emit as bare KEY=value
+        while IFS= read -r line; do
+          # Skip blank lines and comments
+          [[ -z "$line" || "$line" == \#* ]] && continue
+
+          # Must look like KEY=...
+          if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            k="${BASH_REMATCH[1]}"
+            v="${BASH_REMATCH[2]}"
+
+            # Strip surrounding double-quotes if present (upstream .env style)
+            if [[ ${#v} -ge 2 && "$v" == '"'*'"' ]]; then
+              v="${v:1:${#v}-2}"
+            fi
+
+            # Mask the value before writing (idempotent if upstream already did).
+            [[ -n "$v" ]] && echo "::add-mask::$v"
+
+            printf '%s=%s\n' "$k" "$v"
+          fi
+        done < "$SECRETS_FILE" > "$OUT_FILE"
+
+        # Validate: file must be non-empty (at least one secret rendered).
+        if [[ ! -s "$OUT_FILE" ]]; then
+          echo "::error::Dotenv render produced an empty file — check that the Infisical path contains secrets and include-imports is set correctly."
+          exit 1
+        fi
+
+        echo "dotenv-file-path=$OUT_FILE" >> "$GITHUB_OUTPUT"
+
+        # Best-effort cleanup of the intermediate file.
         rm -f "$SECRETS_FILE"
