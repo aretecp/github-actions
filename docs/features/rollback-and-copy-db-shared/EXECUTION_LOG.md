@@ -45,6 +45,22 @@
   - `environment: production` note included in workflow comment to prevent confusion about write direction.
 - **Result**: success — actionlint clean
 
+## [2026-06-04] — PR #59 refinement: vps-deploy-core composite + rollback reuse
+
+- **Action**: Created `actions/vps-deploy-core/action.yml` (new composite). Rewrote `rollback-vps-shared.yml` to call it.
+- **Files changed**:
+  - `actions/vps-deploy-core/action.yml` (new, 15 composite steps)
+  - `.github/workflows/rollback-vps-shared.yml` (rewritten — 22 inline steps → 3 job steps + composite)
+- **Decisions**:
+  - Composite covers: Infisical app load (dotenv), 3 extra shared paths (conditional), merge, VERSION append, encode, infra load (env mode), Tailscale, VPS checkout, env file write, pre-deploy DB backup (skipped when `db-type=none`), `pre-compose-up-script` hook (skipped when empty), compose up, healthcheck.
+  - Hook placement: after env-file write AND after pre-deploy DB backup, before compose up. Runs via `appleboy/ssh-action@v1.2.0` with `command_timeout: 10m`. Caller supplies all logic; composite just `eval`s it after `cd "$REPO_DIR"`.
+  - Rollback now has 3 job steps: (1) confirm gate (runner, conditional on restore-db-snapshot), (2) build restore script (runner, writes multiline to GITHUB_OUTPUT), (3) call vps-deploy-core with `db-type: none` + `pre-compose-up-script` from step 2 output.
+  - Deploy behavior unaffected: `pre-compose-up-script` defaults to empty string → `if: inputs.pre-compose-up-script != ''` skips the hook step entirely. Deploy callers that don't pass the input see no change.
+  - `allow-clone: 'false'` hardcoded for rollback — rollback never clones.
+  - Actionlint SC2295 fix: `${SNAP_DIR_IN_VOL#${DB_DIR}/}` → `_prefix="${DB_DIR}/"; ${SNAP_DIR_IN_VOL#"${_prefix}"}`.
+- **Validation**: YAML parse clean (all 3 files). actionlint clean on both workflow files (composite skipped per spec).
+- **Result**: success
+
 ## [2026-06-04] — Final summary
 
 All Phase 2 + 3 steps complete. PLAN.md status set to Done.
