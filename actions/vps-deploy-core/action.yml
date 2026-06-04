@@ -175,6 +175,15 @@ inputs:
     required: false
     default: 'false'
 
+  pre-compose-up-script:
+    description: >-
+      Optional bash script run on the VPS after the env file is written (and the
+      optional pre-deploy backup) but BEFORE `compose up`. Empty (default) =
+      no-op, so deploy/copy-db are unaffected. rollback-vps-shared injects its
+      destructive DB-restore here so it can reuse this composite.
+    required: false
+    default: ''
+
 runs:
   using: composite
   steps:
@@ -509,6 +518,29 @@ runs:
               exit 1
               ;;
           esac
+
+    # ── 5b. Optional pre-compose-up hook ─────────────────────────────────────
+    # Runs a caller-supplied script on the VPS after the env file is written and
+    # the (optional) backup, but BEFORE `compose up`. Empty by default (deploy
+    # and copy-db pass nothing). rollback-vps-shared uses it to inject the
+    # destructive DB-restore so it can reuse this composite instead of
+    # duplicating the whole sequence.
+    - name: Run pre-compose-up script on VPS
+      if: ${{ inputs.pre-compose-up-script != '' }}
+      uses: appleboy/ssh-action@v1.2.0
+      env:
+        REPO_DIR: ${{ inputs.repo-dir }}
+        PRE_COMPOSE_SCRIPT: ${{ inputs.pre-compose-up-script }}
+      with:
+        host: ${{ env.VPS_TAILSCALE_IP }}
+        username: ${{ inputs.vps-user }}
+        key: ${{ env.VPS_SSH_KEY }}
+        envs: REPO_DIR,PRE_COMPOSE_SCRIPT
+        command_timeout: 10m
+        script: |
+          set -euo pipefail
+          cd "$REPO_DIR"
+          eval "$PRE_COMPOSE_SCRIPT"
 
     # ── 6. Compose up ────────────────────────────────────────────────────────
     - name: Docker Compose up on VPS
