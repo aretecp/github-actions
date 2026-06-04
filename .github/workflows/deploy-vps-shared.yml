@@ -184,6 +184,17 @@ on:
         required: true
         type: string
 
+      required-keys:
+        description: >-
+          Space-separated env var names the app REQUIRES (e.g. the app's
+          REQUIRED_KEYS). Before anything touches the VPS, the workflow asserts
+          each is present AND non-empty in the rendered `.env` and FAILS the
+          deploy if not — catching a dropped/missing secret before it can
+          crash-loop the app. Empty (default) = no gate (not recommended).
+        required: false
+        type: string
+        default: ''
+
       compose-force-recreate:
         description: >-
           `true` — pass `--force-recreate` to `compose up`. Avoids a race where
@@ -378,6 +389,31 @@ jobs:
           printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
           echo "Appended VERSION=${VERSION} to dotenv file"
 
+      # Hard pre-deploy gate: refuse to ship an .env that's missing a key the app
+      # REQUIRES. This is what would have caught the dropped MICROSOFT_CLIENT_SECRET
+      # BEFORE the deploy instead of after the app crash-looped. Runs on the runner
+      # before anything touches the VPS.
+      - name: Assert required keys present in rendered env
+        if: ${{ inputs.required-keys != '' }}
+        shell: bash
+        env:
+          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          REQUIRED_KEYS: ${{ inputs.required-keys }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for k in $REQUIRED_KEYS; do
+            # Present AND non-empty: a line `KEY=` followed by at least one char.
+            grep -qE "^${k}=.+" "$DOTENV_FILE" || missing+=("$k")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Rendered env is missing required key(s): ${missing[*]} — refusing to deploy. Check the Infisical folder contents / render for this env." >&2
+            echo "Keys present in the rendered env:" >&2
+            grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$DOTENV_FILE" | sort >&2
+            exit 1
+          fi
+          echo "Required keys all present: $REQUIRED_KEYS"
+
       - name: Encode rendered env file for transfer
         id: encode-env
         shell: bash
@@ -505,9 +541,15 @@ jobs:
               exit 1
             fi
 
-            # First deploy / recovery: DB container not up yet → skip cleanly.
-            if ! docker ps --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
-              echo "DB container '$DB_CONTAINER' not running — first deploy or recovery. Skipping backup."
+            # Only back up when the DB container is cleanly RUNNING. A
+            # crash-looping container shows up in `docker ps` as "restarting"
+            # but `docker exec` into it fails — so check actual state, not mere
+            # presence. Absent / restarting / exited / created → skip cleanly
+            # (the deploy will recreate it). This means recovery deploys do NOT
+            # need the break-glass skip just because the API is down.
+            state="$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo absent)"
+            if [[ "$state" != "running" ]]; then
+              echo "DB container '$DB_CONTAINER' is '$state' (not cleanly running) — skipping pre-deploy backup; the deploy will recreate it."
               exit 0
             fi
 
