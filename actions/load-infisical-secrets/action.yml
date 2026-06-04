@@ -275,6 +275,13 @@ runs:
         #   - Accept KEY=value and KEY="value" (upstream may quote)
         #   - Strip surrounding double-quotes from value if present
         #   - Emit as bare KEY=value
+        # IMPORTANT: only `KEY=value` lines may reach $OUT_FILE. The
+        # `::add-mask::` directives must go to the step's stdout (so the runner
+        # masks them) — NOT into the file. So append KEY=value per line and let
+        # the mask echo flow to stdout; do NOT redirect the whole loop to the
+        # file (that would write the ::add-mask:: lines into the .env and break
+        # `docker compose --env-file`).
+        : > "$OUT_FILE"
         while IFS= read -r line; do
           # Skip blank lines and comments
           [[ -z "$line" || "$line" == \#* ]] && continue
@@ -289,12 +296,13 @@ runs:
               v="${v:1:${#v}-2}"
             fi
 
-            # Mask the value before writing (idempotent if upstream already did).
+            # Mask the value (to stdout/log, idempotent if upstream already did).
             [[ -n "$v" ]] && echo "::add-mask::$v"
 
-            printf '%s=%s\n' "$k" "$v"
+            # Only the assignment goes to the file.
+            printf '%s=%s\n' "$k" "$v" >> "$OUT_FILE"
           fi
-        done < "$SECRETS_FILE" > "$OUT_FILE"
+        done < "$SECRETS_FILE"
 
         # Validate: file must be non-empty (at least one secret rendered).
         if [[ ! -s "$OUT_FILE" ]]; then
