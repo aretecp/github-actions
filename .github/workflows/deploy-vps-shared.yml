@@ -72,11 +72,34 @@ on:
 
       app-path:
         description: >-
-          Infisical folder path for the app secrets, rendered to the dotenv file
-          (e.g. `/areteos`). `include-imports: true` folds shared-dep imports
-          into the single render — no separate load needed for shared secrets.
+          Primary Infisical folder path (in app-project-slug) for this app's
+          secrets, rendered into the dotenv file. `include-imports: true` also
+          folds in any Infisical imports configured on the folder.
         required: true
         type: string
+
+      extra-shared-path-1:
+        description: >-
+          Optional ADDITIONAL folder (in shared-project-slug) to render into the
+          app `.env` — e.g. `/teams` or `/aws/accounts/arete/ses-sender-user`.
+          For shared app secrets that several services consume. On a key
+          conflict the primary `app-path` folder WINS (it is merged last).
+          Empty (default) = not loaded.
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-2:
+        description: 'Second optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-3:
+        description: 'Third optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
 
       infra-path:
         description: >-
@@ -276,6 +299,71 @@ jobs:
           # scp-action (which treats `target` as a directory and keeps the
           # source basename) lands it at repo-dir/<env-file-name>.
           dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
+
+      # Optional additional shared folders rendered into the same .env. Each is
+      # its own conditional step (a reusable workflow can't loop `uses:`); the
+      # merge step below concatenates them with the primary app folder LAST so
+      # it wins on any duplicate key.
+      - name: Load extra shared folder 1 (dotenv mode)
+        id: extra-1
+        if: ${{ inputs.extra-shared-path-1 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-1 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-1.env
+
+      - name: Load extra shared folder 2 (dotenv mode)
+        id: extra-2
+        if: ${{ inputs.extra-shared-path-2 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-2 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-2.env
+
+      - name: Load extra shared folder 3 (dotenv mode)
+        id: extra-3
+        if: ${{ inputs.extra-shared-path-3 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-3 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
+
+      - name: Merge extra shared folders into the env file
+        if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' }}
+        shell: bash
+        env:
+          APP_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          E1: ${{ steps.extra-1.outputs.dotenv-file-path }}
+          E2: ${{ steps.extra-2.outputs.dotenv-file-path }}
+          E3: ${{ steps.extra-3.outputs.dotenv-file-path }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          # Extras first, primary app folder LAST → app wins on duplicate keys.
+          for f in "$E1" "$E2" "$E3"; do
+            [[ -n "$f" && -f "$f" ]] && cat "$f" >> "$tmp"
+          done
+          cat "$APP_FILE" >> "$tmp"
+          mv "$tmp" "$APP_FILE"
+          echo "Merged extra shared folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
 
       - name: Append VERSION to dotenv file
         shell: bash

@@ -168,6 +168,21 @@ Prod shims should NOT include `allow-clone: true`. If the VPS directory is ever 
 
 ---
 
+## Optional inputs — extra shared folders, DB backup, compose flags
+
+### Extra shared folders in the `.env` (`extra-shared-path-1/2/3`)
+
+The primary `app-path` (in `app-project-slug`) is always rendered into the `.env`. Repos that also need **shared** secrets in the app `.env` (e.g. areteos pulls `/teams` and `/aws/accounts/arete/ses-sender-user`) list those folders here — each is loaded from `shared-project-slug` and merged into the same `.env`:
+
+```yaml
+      app-path: /areteos                                  # primary, app-project
+      extra-shared-path-1: /teams                         # shared-project
+      extra-shared-path-2: /aws/accounts/arete/ses-sender-user
+      # extra-shared-path-3: ...
+```
+
+Precedence: extras are merged **first**, the primary `app-path` folder **last**, so on a duplicate key the app folder wins (matches the old "app load runs last" rule). Up to 3 extra folders; all live in `shared-project-slug`. (Infisical imports on the app folder still work too, and need no input — use whichever you prefer; `extra-shared-path-*` keeps the choice visible in the workflow.)
+
 ## Optional inputs — DB backup + compose flags
 
 ### Pre-deploy DB backup (first-class, `db-type`)
