@@ -195,3 +195,18 @@ to consume it. Validated YAML + actionlint on both files.
   is the pattern that keeps the composite stateless w.r.t. Infisical.
 
 ### Result: success
+
+**Validation:**
+- `python3 yaml.safe_load` on both files: valid
+- actionlint on `deploy-vps-shared.yml`: clean (0 errors)
+- actionlint on `actions/vps-deploy-core/action.yml`: expected "not a workflow" errors only (composite action format, not a workflow file — this is correct)
+- Composite: 15 steps confirmed via structured parse, matching 1:1 with original
+- Input pass-through: 28 inputs forwarded; `environment` correctly stays at job level only (used by `environment:` key, not needed inside composite)
+- Python heredoc indentation: PYEOF terminator at same indent as body lines in both original and composite — Python arrives at VPS at column 0 in both cases
+
+**PR:** https://github.com/aretecp/github-actions/pull/58 (base: main)
+
+**Open Question resolutions (from PLAN.md):**
+- Composite reproduces rendered .env exactly: structurally confirmed by step-by-step audit; runtime confirmation is the Phase 1 gate (bd-pulse DEV deploy re-verification after merge)
+- Composite versioning: rides the `v2` tag — it's an internal implementation detail, not a standalone action callers pin
+- Postgres rollback/copy ordering: captured from areteos source in Phase 0; bd-pulse sqlite order proven; areteos pg verified in Phase 7
