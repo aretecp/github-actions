@@ -219,7 +219,8 @@ The shared workflow can snapshot the live DB **before** `compose up` recreates c
 |-------|---------|-------------|
 | `compose-build` | `true` | `false` only if the compose pulls pre-built images instead of building from source |
 | `compose-force-recreate` | `false` | `true` if the compose uses fixed `container_name`s and you hit hash-prefixed container names on redeploy (breaks health-inspect + Traefik routing) |
-| `compose-remove-orphans` | `false` | ⚠️ Leave `false` if Traefik (or anything) runs in a **separate** compose stack on the VPS — `--remove-orphans` would delete it. Only `true` if this compose owns every container on the box |
+
+> There is intentionally **no** `--remove-orphans` option. On Areté VPSes every box runs Traefik as a separate stack and dev + prod share a compose project, so `--remove-orphans` could only delete other running services. Orphan cleanup, if ever needed, is a deliberate manual operation.
 
 ---
 
@@ -306,7 +307,7 @@ jobs:
 
 Notes specific to areteos:
 - No `compose-force-recreate` (the old areteos deploy didn't use it; add only if you hit hash-prefixed container names).
-- `compose-remove-orphans` stays default `false` — areteos's VPS also runs Traefik via labels (separate stack).
+- No `--remove-orphans` (not an option) — areteos's VPS also runs Traefik via labels (separate stack).
 - Confirm the Postgres `pg_dump` auth works via `docker exec` (the image's local trust auth); if it needs a password, pass `PGPASSWORD` into the container.
 - Move areteos's non-secret config (`PHX_HOST`/`PHX_HOST_DEV`, `EMAIL_FROM_ADDRESS`, `ENVIRONMENT`, `LANGFUSE_HOST`, `AUDIT_RETENTION_DAYS`) into the `/areteos` Infisical folder per Step 1.2 before flipping.
 

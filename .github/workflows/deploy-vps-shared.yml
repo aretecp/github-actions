@@ -194,16 +194,12 @@ on:
         type: boolean
         default: false
 
-      compose-remove-orphans:
-        description: >-
-          `true` — pass `--remove-orphans` to `compose up`. ⚠️ DANGEROUS on a
-          VPS that runs Traefik (or anything) in a SEPARATE compose stack: the
-          app's compose would treat it as an orphan and delete it, taking the
-          reverse proxy down with it. Default `false` — leave it off unless this
-          compose project owns every container on the box.
-        required: false
-        type: boolean
-        default: false
+      # NOTE: there is deliberately no `--remove-orphans` option. On Areté VPSes
+      # every box runs Traefik as a separate compose stack, and dev + prod share
+      # a compose project — so --remove-orphans could only ever delete OTHER
+      # running services (e.g. take down prod or the reverse proxy). Orphan
+      # cleanup, when genuinely needed, is a deliberate human operation, not part
+      # of an automated deploy.
 
       # --- Pre-deploy DB backup (first-class) -------------------------------
       # Runs after checkout, before `compose up`. Snapshots the live DB so a
@@ -591,23 +587,21 @@ jobs:
           ENV_FILE_NAME: ${{ inputs.env-file-name }}
           COMPOSE_BUILD: ${{ inputs.compose-build }}
           COMPOSE_FORCE_RECREATE: ${{ inputs.compose-force-recreate }}
-          COMPOSE_REMOVE_ORPHANS: ${{ inputs.compose-remove-orphans }}
         with:
           host: ${{ env.VPS_TAILSCALE_IP }}
           username: ${{ inputs.vps-user }}
           key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE,COMPOSE_REMOVE_ORPHANS
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE
           script: |
             set -euo pipefail
             cd "$REPO_DIR"
 
-            # Assemble `up` flags. --remove-orphans is OFF by default: on a VPS
-            # with Traefik (or anything) in a separate compose stack it would
-            # delete that stack as an "orphan".
+            # Assemble `up` flags. There is intentionally NO --remove-orphans:
+            # on a shared VPS it would delete other stacks' containers (Traefik,
+            # or the prod project that shares this dir). See the input section.
             UP_FLAGS=(-d)
             [[ "$COMPOSE_BUILD" == "true" ]] && UP_FLAGS+=(--build)
             [[ "$COMPOSE_FORCE_RECREATE" == "true" ]] && UP_FLAGS+=(--force-recreate)
-            [[ "$COMPOSE_REMOVE_ORPHANS" == "true" ]] && UP_FLAGS+=(--remove-orphans)
 
             echo "Starting services: compose=$COMPOSE_FILE env=$ENV_FILE_NAME flags=${UP_FLAGS[*]}"
             if [[ "$COMPOSE_BUILD" != "true" ]]; then
