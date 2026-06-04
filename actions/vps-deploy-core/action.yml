@@ -1,28 +1,21 @@
 name: VPS Deploy Core
 description: >-
-  Composite action: load app secrets → render env file → load infra creds →
-  connect to Tailscale → checkout/clone on VPS → write env file → optional
-  pre-deploy DB backup → optional pre-compose-up-script hook → docker compose
-  up → wait-for-healthy. Used by deploy-vps-shared and rollback-vps-shared.
+  Composite action encapsulating the shared VPS deploy scaffolding used by
+  deploy-vps-shared, rollback-vps-shared, and copy-prod-db-shared. Handles
+  Infisical secret loads (dotenv + env modes), env-file render/encode/write,
+  repo checkout, optional pre-deploy DB backup, Docker Compose up, and the
+  wait-for-healthy healthcheck.
 
-# ADDITIVE HOOK
-# -------------
-# `pre-compose-up-script`: a shell script (multi-line string) to run on the VPS
-# via ssh AFTER the env file is written and AFTER the pre-deploy DB backup step,
-# BEFORE `docker compose up`. Skipped when empty (default). Intended for rollback
-# DB restore; the script runs as the vps-user inside the VPS shell.
-#
-# Deploy callers pass nothing → hook is skipped → no behavior change.
-# Rollback callers pass the DB restore script → hook runs the restore.
+  Callers MUST grant: id-token: write, contents: read
 
 inputs:
-  # --- Infisical identity -------------------------------------------------------
+  # ── Infisical identity ────────────────────────────────────────────────────
   infisical-identity-id:
     description: Infisical OIDC machine identity UUID.
     required: true
 
   shared-project-slug:
-    description: Infisical project slug holding the infra/deploy folder.
+    description: Infisical project slug holding shared/infra folders.
     required: true
 
   app-project-slug:
@@ -30,52 +23,42 @@ inputs:
     required: true
 
   env-slug:
-    description: Infisical environment slug (dev, prod, etc.).
+    description: Infisical environment slug (e.g. dev, prod). Applied to all loads.
     required: true
 
   app-path:
-    description: Primary Infisical folder path (in app-project-slug) for this app's secrets.
+    description: >-
+      Primary Infisical folder path (in app-project-slug) for this app's secrets,
+      rendered into the dotenv file. include-imports:true folds in Infisical imports.
     required: true
 
   extra-shared-path-1:
-    description: Optional additional folder (in shared-project-slug) rendered into the app .env.
+    description: >-
+      Optional additional folder (in shared-project-slug) rendered into the app .env.
+      On a key conflict the primary app-path folder WINS (merged last). Empty = not loaded.
     required: false
     default: ''
 
   extra-shared-path-2:
-    description: Second optional shared folder rendered into the app .env.
+    description: Second optional shared folder rendered into the app .env (see extra-shared-path-1).
     required: false
     default: ''
 
   extra-shared-path-3:
-    description: Third optional shared folder rendered into the app .env.
+    description: Third optional shared folder rendered into the app .env (see extra-shared-path-1).
     required: false
     default: ''
 
   infra-path:
     description: >-
-      Infisical folder path for deploy/infra credentials in the shared project.
-      Loaded in env mode (never written to the app dotenv). Defaults to /tailscale.
+      Infisical folder for deploy/infra credentials (TAILSCALE_AUTHKEY, VPS_TAILSCALE_IP,
+      VPS_SSH_KEY). Loaded in env mode — never written to the app dotenv.
     required: false
     default: /tailscale
 
-  # --- Env file -----------------------------------------------------------------
-  env-file-name:
-    description: >-
-      Filename for the rendered env file on the VPS, relative to repo-dir.
-      Convention: .env for prod, .env.dev for dev.
-    required: false
-    default: .env
-
-  version-label:
-    description: >-
-      Value to append as VERSION= in the rendered env file. For deploy this is
-      the git ref (e.g. main, v1.2.3); for rollback this is the rollback tag.
-    required: true
-
-  # --- VPS connection -----------------------------------------------------------
+  # ── Deploy target ─────────────────────────────────────────────────────────
   vps-user:
-    description: SSH user on the VPS (e.g. ubuntu, deploy).
+    description: SSH user on the VPS.
     required: true
 
   repo-dir:
@@ -83,56 +66,68 @@ inputs:
     required: true
 
   repo-url:
-    description: >-
-      Git clone URL. Used only when allow-clone=true (dev). Ignored otherwise.
+    description: Git clone URL. Used only when allow-clone is true (dev). Ignored in prod.
     required: false
     default: ''
 
-  ref:
-    description: >-
-      Git branch or tag to check out on the VPS. Used when allow-clone=true
-      (deploy) or always for tag checkout (rollback should pass the version tag
-      here and set allow-clone=false).
-    required: false
-    default: main
-
-  allow-clone:
-    description: >-
-      true — may clone repo-url on the VPS if the checkout directory does not
-      exist (dev only). false (default) — requires existing checkout; fails
-      with a clear error if the dir is missing.
-    required: false
-    default: 'false'
-
-  # --- Compose ------------------------------------------------------------------
   compose-file:
-    description: Docker Compose file to use on the VPS. Relative to repo-dir.
+    description: Docker Compose file to use on the VPS (relative to repo-dir).
     required: true
 
   compose-build:
     description: >-
       true (default) — build images from source (up -d --build).
-      false — pull pre-built images then up -d.
+      false — pull pre-built images then up -d without --build.
     required: false
     default: 'true'
 
-  compose-force-recreate:
-    description: true — pass --force-recreate to compose up. Default false.
+  env-file-name:
+    description: Filename for the rendered env file on the VPS, relative to repo-dir.
+    required: false
+    default: .env
+
+  ref:
+    description: Git branch or tag to deploy. Checked out on the VPS when allow-clone is true.
+    required: false
+    default: main
+
+  allow-clone:
+    description: >-
+      true — may clone the repo on the VPS if the dir does not exist (dev).
+      false (default) — refuses to clone; checkout must already exist (prod).
     required: false
     default: 'false'
 
   healthcheck-containers:
     description: >-
       Space-separated list of Docker container names to pass to
-      scripts/wait-for-healthy.sh. All must reach healthy status.
+      scripts/wait-for-healthy.sh. All listed containers must reach healthy status.
     required: true
 
-  # --- Pre-deploy DB backup (skipped when db-type=none) -------------------------
+  required-keys:
+    description: >-
+      Space-separated env var names the app requires. Asserted present and non-empty
+      in the rendered .env before anything touches the VPS. Empty = no gate.
+    required: false
+    default: ''
+
+  compose-force-recreate:
+    description: >-
+      true — pass --force-recreate to compose up (avoids fixed container_name race).
+      Default false.
+    required: false
+    default: 'false'
+
+  # NOTE: there is deliberately no --remove-orphans option. On Areté VPSes every
+  # box runs Traefik as a separate compose stack, and dev + prod share a compose
+  # project — so --remove-orphans could only ever delete OTHER running services.
+
+  # ── Pre-deploy DB backup ──────────────────────────────────────────────────
   db-type:
     description: >-
-      none (default) — no pre-deploy backup. sqlite — WAL-safe .backup() of
-      db-path inside db-container. postgres — pg_dump of db-name from
-      db-container. Pass none to skip (rollback restores; it does not snapshot).
+      none (default) — no pre-deploy backup.
+      sqlite — integrity-check + WAL-safe .backup() of a SQLite file inside db-container.
+      postgres — pg_dump of db-name from db-container.
     required: false
     default: none
 
@@ -142,24 +137,28 @@ inputs:
     default: ''
 
   db-path:
-    description: SQLite only — absolute path to the .db file inside db-container.
+    description: 'SQLite only: absolute path to the .db file inside db-container.'
     required: false
     default: ''
 
   db-name:
-    description: Postgres only — database name to dump.
+    description: 'Postgres only: database name to dump.'
     required: false
     default: ''
 
   db-user:
-    description: Postgres only — database user for pg_dump.
+    description: 'Postgres only: database user for pg_dump.'
     required: false
     default: ''
 
   snapshot-dir:
     description: >-
-      Directory for pre-deploy snapshots. sqlite: inside the container on the
-      data volume. postgres: on the VPS host under repo-dir. Must be persistent.
+      Directory for pre-deploy snapshots.
+      sqlite: path INSIDE the container on the data volume
+        (default: <dirname of db-path>/pre-deploy-snapshots).
+      postgres: path on the VPS HOST under repo-dir
+        (default: <repo-dir>/pre-deploy-snapshots).
+      Must be on persistent storage, not ephemeral.
     required: false
     default: ''
 
@@ -170,28 +169,25 @@ inputs:
 
   skip-pre-deploy:
     description: >-
-      Break-glass: true skips the pre-deploy DB backup entirely.
+      Break-glass: true skips the pre-deploy DB backup entirely. Wire to a
+      workflow_dispatch input so operators can recover from a broken API without
+      the backup step blocking the deploy. Default false.
     required: false
     default: 'false'
 
-  # --- Hook (additive, default empty = no-op) -----------------------------------
   pre-compose-up-script:
     description: >-
-      Shell script to run on the VPS (via ssh) AFTER the env file is written
-      and AFTER the pre-deploy DB backup, BEFORE docker compose up. Executed
-      as vps-user inside the VPS shell. Skipped when empty (default).
-      Callers are responsible for all logic inside the script.
-      Deploy callers omit this input → no behavior change.
+      Optional bash script run on the VPS after the env file is written (and the
+      optional pre-deploy backup) but BEFORE `compose up`. Empty (default) =
+      no-op, so deploy/copy-db are unaffected. rollback-vps-shared injects its
+      destructive DB-restore here so it can reuse this composite.
     required: false
     default: ''
 
 runs:
   using: composite
   steps:
-    # ---------------------------------------------------------------------------
-    # Env file render
-    # ---------------------------------------------------------------------------
-
+    # ── 1. Render app dotenv ─────────────────────────────────────────────────
     - name: Load app secrets from Infisical (dotenv mode)
       id: load-app-secrets
       uses: aretecp/github-actions/actions/load-infisical-secrets@v2
@@ -203,8 +199,13 @@ runs:
         path: ${{ inputs.app-path }}
         include-imports: 'true'
         export-as-env: dotenv
+        # Render to a temp file on the runner; the Encode step base64s it and
+        # the Write env file step decodes it onto the VPS at the final name.
         dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
 
+    # Optional additional shared folders rendered into the same .env. Each is its
+    # own conditional step (a composite can't loop uses:); the merge step
+    # concatenates them with the primary app folder LAST so it wins on any dup key.
     - name: Load extra shared folder 1 (dotenv mode)
       id: extra-1
       if: ${{ inputs.extra-shared-path-1 != '' }}
@@ -273,11 +274,40 @@ runs:
       shell: bash
       env:
         DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-        VERSION_LABEL: ${{ inputs.version-label }}
+        REF: ${{ inputs.ref }}
       run: |
         set -euo pipefail
-        printf 'VERSION=%s\n' "$VERSION_LABEL" >> "$DOTENV_FILE"
-        echo "Appended VERSION=${VERSION_LABEL} to dotenv file"
+        # Use the ref verbatim (e.g. tag v1.2.3 stays v1.2.3) to match the
+        # existing per-repo heredocs — apps may parse the exact string.
+        # VERSION is NOT a secret — do not ::add-mask:: it (masking a value
+        # like "main" would redact that word from every log line).
+        VERSION="$REF"
+        printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
+        echo "Appended VERSION=${VERSION} to dotenv file"
+
+    # Hard pre-deploy gate: refuse to ship an .env that's missing a key the app
+    # REQUIRES. Catches a dropped/missing secret before it can crash-loop the app.
+    # Runs on the runner before anything touches the VPS.
+    - name: Assert required keys present in rendered env
+      if: ${{ inputs.required-keys != '' }}
+      shell: bash
+      env:
+        DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+        REQUIRED_KEYS: ${{ inputs.required-keys }}
+      run: |
+        set -euo pipefail
+        missing=()
+        for k in $REQUIRED_KEYS; do
+          # Present AND non-empty: a line `KEY=` followed by at least one char.
+          grep -qE "^${k}=.+" "$DOTENV_FILE" || missing+=("$k")
+        done
+        if (( ${#missing[@]} )); then
+          echo "::error::Rendered env is missing required key(s): ${missing[*]} — refusing to deploy. Check the Infisical folder contents / render for this env." >&2
+          echo "Keys present in the rendered env:" >&2
+          grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$DOTENV_FILE" | sort >&2
+          exit 1
+        fi
+        echo "Required keys all present: $REQUIRED_KEYS"
 
     - name: Encode rendered env file for transfer
       id: encode-env
@@ -287,15 +317,13 @@ runs:
       run: |
         set -euo pipefail
         # Single-line base64 so the whole .env rides through ssh-action's
-        # envs: as one variable — no quoting issues. Masked since it is secrets.
+        # envs: as one variable — no scp (drone-scp breaks on the VPS login
+        # shell's mise stderr), no quoting issues. Masked since it is secrets.
         b64="$(base64 -w0 "$DOTENV_FILE")"
         echo "::add-mask::$b64"
         echo "b64=$b64" >> "$GITHUB_OUTPUT"
 
-    # ---------------------------------------------------------------------------
-    # Infra creds + Tailscale
-    # ---------------------------------------------------------------------------
-
+    # ── 2. Infra creds + Tailscale ───────────────────────────────────────────
     - name: Load infra secrets from Infisical (env mode)
       uses: aretecp/github-actions/actions/load-infisical-secrets@v2
       with:
@@ -304,6 +332,8 @@ runs:
         project-slug: ${{ inputs.shared-project-slug }}
         environment: ${{ inputs.env-slug }}
         path: ${{ inputs.infra-path }}
+        # Shared folders organize creds in subfolders (e.g. /tailscale/*), so
+        # sweep recursively — matches the original per-repo deploys.
         recursive: 'true'
         include-imports: 'true'
         export-as-env: 'true'
@@ -313,10 +343,9 @@ runs:
       with:
         authkey: ${{ env.TAILSCALE_AUTHKEY }}
 
-    # ---------------------------------------------------------------------------
-    # VPS checkout + env file write
-    # ---------------------------------------------------------------------------
-
+    # ── 3. VPS checkout ──────────────────────────────────────────────────────
+    # Checkout MUST run before the env-file write — the write targets repo-dir,
+    # which dev first-clone creates here.
     - name: Prepare repo checkout on VPS
       uses: appleboy/ssh-action@v1.2.0
       env:
@@ -334,8 +363,8 @@ runs:
 
           if [[ ! -d "$REPO_DIR/.git" ]]; then
             if [[ "$ALLOW_CLONE" != "true" ]]; then
-              echo "::error::repo-dir '$REPO_DIR' does not contain a git checkout and allow-clone is false." >&2
-              echo "For prod/rollback deploys the checkout must already exist on the VPS." >&2
+              echo "ERROR: repo-dir '$REPO_DIR' does not contain a git checkout and allow-clone is false." >&2
+              echo "For prod deploys the checkout must already exist on the VPS." >&2
               exit 1
             fi
             echo "Cloning $REPO_URL into $REPO_DIR..."
@@ -352,6 +381,11 @@ runs:
             git pull --ff-only origin "$REF"
           fi
 
+    # ── 4. Write env file ────────────────────────────────────────────────────
+    # Write the env file over ssh (not scp): drone-scp fails on this VPS
+    # because the login shell emits mise warnings to stderr. ssh-action
+    # tolerates that (the checkout step above uses it successfully). The
+    # base64 blob rides in via envs: and is decoded on the VPS.
     - name: Write env file to VPS
       uses: appleboy/ssh-action@v1.2.0
       env:
@@ -374,10 +408,11 @@ runs:
           fi
           echo "Wrote $TARGET ($(grep -c '=' "$TARGET") vars)."
 
-    # ---------------------------------------------------------------------------
-    # Pre-deploy DB backup (skipped when db-type=none or skip-pre-deploy=true)
-    # ---------------------------------------------------------------------------
-
+    # ── 5. Pre-deploy DB backup ───────────────────────────────────────────────
+    # First-class pre-deploy DB backup. Runs before compose recreates containers
+    # so a corrupt/failed deploy is recoverable. No-op when db-type=none,
+    # skip-pre-deploy=true, or the DB container isn't running yet (first deploy /
+    # recovery).
     - name: Pre-deploy DB backup
       if: ${{ inputs.db-type != 'none' && inputs.skip-pre-deploy != 'true' }}
       uses: appleboy/ssh-action@v1.2.0
@@ -404,9 +439,15 @@ runs:
             exit 1
           fi
 
-          # First deploy / recovery: DB container not up yet → skip cleanly.
-          if ! docker ps --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
-            echo "DB container '$DB_CONTAINER' not running — first deploy or recovery. Skipping backup."
+          # Only back up when the DB container is cleanly RUNNING. A
+          # crash-looping container shows up in docker ps as "restarting"
+          # but docker exec into it fails — so check actual state, not mere
+          # presence. Absent / restarting / exited / created → skip cleanly
+          # (the deploy will recreate it). This means recovery deploys do NOT
+          # need the break-glass skip just because the API is down.
+          state="$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo absent)"
+          if [[ "$state" != "running" ]]; then
+            echo "DB container '$DB_CONTAINER' is '$state' (not cleanly running) — skipping pre-deploy backup; the deploy will recreate it."
             exit 0
           fi
 
@@ -421,6 +462,10 @@ runs:
               # Snapshot dir lives INSIDE the container on the data volume.
               SNAP_DIR="${SNAPSHOT_DIR:-$(dirname "$DB_PATH")/pre-deploy-snapshots}"
               echo "SQLite integrity-check + WAL-safe snapshot of $DB_PATH → $SNAP_DIR (container $DB_CONTAINER)"
+              # Python fed via stdin heredoc. The heredoc body + terminator
+              # sit at the script block's BASE column (12 spaces) so YAML
+              # dedent lands the Python at column 0 — a python -c nested
+              # deeper would dedent to a leading indent → IndentationError.
               docker exec -i -e DB_PATH="$DB_PATH" -e SNAP_DIR="$SNAP_DIR" -e TS="$TS" -e RETENTION_DAYS="$RETENTION_DAYS" "$DB_CONTAINER" python - <<'PYEOF'
           import sqlite3, os, time
           db = os.environ["DB_PATH"]; snap_dir = os.environ["SNAP_DIR"]
@@ -457,6 +502,8 @@ runs:
               echo "Postgres pg_isready + pg_dump of $DB_NAME → $SNAP_DIR (container $DB_CONTAINER)"
               docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME"
               SNAP="$SNAP_DIR/pre-deploy-$TS.sql.gz"
+              # pg_dump streams to the host file; gzip on the host. set -o
+              # pipefail ensures a pg_dump failure fails the step.
               docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$SNAP"
               if [[ ! -s "$SNAP" ]]; then
                 echo "::error::pg_dump produced an empty snapshot at $SNAP." >&2
@@ -472,12 +519,12 @@ runs:
               ;;
           esac
 
-    # ---------------------------------------------------------------------------
-    # Pre-compose-up hook (additive — skipped when input is empty)
-    # Runs AFTER env-file write + pre-deploy DB backup, BEFORE compose up.
-    # Deploy callers omit this → skipped → no behavior change.
-    # ---------------------------------------------------------------------------
-
+    # ── 5b. Optional pre-compose-up hook ─────────────────────────────────────
+    # Runs a caller-supplied script on the VPS after the env file is written and
+    # the (optional) backup, but BEFORE `compose up`. Empty by default (deploy
+    # and copy-db pass nothing). rollback-vps-shared uses it to inject the
+    # destructive DB-restore so it can reuse this composite instead of
+    # duplicating the whole sequence.
     - name: Run pre-compose-up script on VPS
       if: ${{ inputs.pre-compose-up-script != '' }}
       uses: appleboy/ssh-action@v1.2.0
@@ -495,10 +542,7 @@ runs:
           cd "$REPO_DIR"
           eval "$PRE_COMPOSE_SCRIPT"
 
-    # ---------------------------------------------------------------------------
-    # Docker Compose up + healthcheck
-    # ---------------------------------------------------------------------------
-
+    # ── 6. Compose up ────────────────────────────────────────────────────────
     - name: Docker Compose up on VPS
       uses: appleboy/ssh-action@v1.2.0
       env:
@@ -516,16 +560,21 @@ runs:
           set -euo pipefail
           cd "$REPO_DIR"
 
+          # Assemble up flags. There is intentionally NO --remove-orphans:
+          # on a shared VPS it would delete other stacks' containers (Traefik,
+          # or the prod project that shares this dir). See the input section.
           UP_FLAGS=(-d)
           [[ "$COMPOSE_BUILD" == "true" ]] && UP_FLAGS+=(--build)
           [[ "$COMPOSE_FORCE_RECREATE" == "true" ]] && UP_FLAGS+=(--force-recreate)
 
           echo "Starting services: compose=$COMPOSE_FILE env=$ENV_FILE_NAME flags=${UP_FLAGS[*]}"
           if [[ "$COMPOSE_BUILD" != "true" ]]; then
+            # Not building from source — pull pre-built images first.
             docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" pull
           fi
           docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" up "${UP_FLAGS[@]}"
 
+    # ── 7. Healthcheck ───────────────────────────────────────────────────────
     - name: Wait for containers to become healthy
       uses: appleboy/ssh-action@v1.2.0
       env:
@@ -541,9 +590,10 @@ runs:
         command_timeout: 5m
         script: |
           set -euo pipefail
-          # Pinned to v2 — same major as the shared workflows. Do NOT use
-          # github.ref_name here (resolves to the caller's ref in a reusable
-          # workflow, not this repo's tag).
+          # Fetch wait-for-healthy.sh pinned to this workflow suite's major tag (v2).
+          # Do NOT use github.ref_name — in a reusable workflow that resolves to
+          # the CALLER's ref (e.g. a consumer's develop), which 404s here.
+          # Bump this tag when cutting a new major of the shared workflow suite.
           curl -fsSL \
             "https://raw.githubusercontent.com/aretecp/github-actions/v2/scripts/wait-for-healthy.sh" \
             | COMPOSE_FILE="$REPO_DIR/$COMPOSE_FILE" \
