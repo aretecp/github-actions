@@ -251,7 +251,7 @@ jobs:
       app-path: /areteos
       extra-shared-path-1: /aws/accounts/arete/ses-sender-user   # SES → .env
       vps-user: ${{ vars.VPS_USER }}
-      repo-dir: /home/REPLACE_VPS_USER/areteos   # REPLACE: old workflow used $HOME/areteos
+      repo-dir: /home/sglyon/areteos   # all apps share the /home/sglyon root on the VPS
       repo-url: https://github.com/aretecp/areteos.git
       compose-file: docker-compose.dev.yml
       env-file-name: .env.dev
@@ -291,7 +291,7 @@ jobs:
       extra-shared-path-1: /teams                                # Teams webhook → .env
       extra-shared-path-2: /aws/accounts/arete/ses-sender-user   # SES → .env
       vps-user: ${{ vars.VPS_USER }}
-      repo-dir: /home/REPLACE_VPS_USER/areteos   # REPLACE: old workflow used $HOME/areteos
+      repo-dir: /home/sglyon/areteos   # all apps share the /home/sglyon root on the VPS
       repo-url: https://github.com/aretecp/areteos.git
       compose-file: docker-compose.prod.yml
       env-file-name: .env
