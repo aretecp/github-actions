@@ -18,6 +18,10 @@ name: Deploy to VPS (shared)
 #   6. docker compose --env-file <env-file-name> up -d --pull always
 #   7. scripts/wait-for-healthy.sh over healthcheck-containers.
 #
+# All scaffolding is delegated to actions/vps-deploy-core — a composite that
+# rollback-vps-shared and copy-prod-db-shared also consume. The proven core
+# VPS logic lives in exactly one place.
+#
 # Scope: deploy-from-scratch only (v2). Rollback and copy-prod-db are a
 # fast-follow, not covered here.
 #
@@ -291,388 +295,34 @@ jobs:
       contents: read
 
     steps:
-      - name: Load app secrets from Infisical (dotenv mode)
-        id: load-app-secrets
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+      - name: Deploy via vps-deploy-core
+        uses: aretecp/github-actions/actions/vps-deploy-core@v2
         with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.app-project-slug }}
-          environment: ${{ inputs.env-slug }}
-          path: ${{ inputs.app-path }}
-          include-imports: 'true'
-          export-as-env: dotenv
-          # Render to a temp file on the runner; the "Encode" step base64s it and
-          # the "Write env file" step decodes it onto the VPS at the final name.
-          dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
-
-      # Optional additional shared folders rendered into the same .env. Each is
-      # its own conditional step (a reusable workflow can't loop `uses:`); the
-      # merge step below concatenates them with the primary app folder LAST so
-      # it wins on any duplicate key.
-      - name: Load extra shared folder 1 (dotenv mode)
-        id: extra-1
-        if: ${{ inputs.extra-shared-path-1 != '' }}
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
-        with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.shared-project-slug }}
-          environment: ${{ inputs.env-slug }}
-          path: ${{ inputs.extra-shared-path-1 }}
-          recursive: 'true'
-          include-imports: 'true'
-          export-as-env: dotenv
-          dotenv-output-path: ${{ runner.temp }}/extra-shared-1.env
-
-      - name: Load extra shared folder 2 (dotenv mode)
-        id: extra-2
-        if: ${{ inputs.extra-shared-path-2 != '' }}
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
-        with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.shared-project-slug }}
-          environment: ${{ inputs.env-slug }}
-          path: ${{ inputs.extra-shared-path-2 }}
-          recursive: 'true'
-          include-imports: 'true'
-          export-as-env: dotenv
-          dotenv-output-path: ${{ runner.temp }}/extra-shared-2.env
-
-      - name: Load extra shared folder 3 (dotenv mode)
-        id: extra-3
-        if: ${{ inputs.extra-shared-path-3 != '' }}
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
-        with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.shared-project-slug }}
-          environment: ${{ inputs.env-slug }}
-          path: ${{ inputs.extra-shared-path-3 }}
-          recursive: 'true'
-          include-imports: 'true'
-          export-as-env: dotenv
-          dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
-
-      - name: Merge extra shared folders into the env file
-        if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' }}
-        shell: bash
-        env:
-          APP_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-          E1: ${{ steps.extra-1.outputs.dotenv-file-path }}
-          E2: ${{ steps.extra-2.outputs.dotenv-file-path }}
-          E3: ${{ steps.extra-3.outputs.dotenv-file-path }}
-        run: |
-          set -euo pipefail
-          tmp="$(mktemp)"
-          # Extras first, primary app folder LAST → app wins on duplicate keys.
-          for f in "$E1" "$E2" "$E3"; do
-            [[ -n "$f" && -f "$f" ]] && cat "$f" >> "$tmp"
-          done
-          cat "$APP_FILE" >> "$tmp"
-          mv "$tmp" "$APP_FILE"
-          echo "Merged extra shared folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
-
-      - name: Append VERSION to dotenv file
-        shell: bash
-        env:
-          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-          REF: ${{ inputs.ref }}
-        run: |
-          set -euo pipefail
-          # Use the ref verbatim (e.g. tag `v1.2.3` stays `v1.2.3`) to match the
-          # existing per-repo heredocs — apps may parse the exact string.
-          # VERSION is NOT a secret — do not ::add-mask:: it (masking a value
-          # like "main" would redact that word from every log line).
-          VERSION="$REF"
-          printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
-          echo "Appended VERSION=${VERSION} to dotenv file"
-
-      # Hard pre-deploy gate: refuse to ship an .env that's missing a key the app
-      # REQUIRES. This is what would have caught the dropped MICROSOFT_CLIENT_SECRET
-      # BEFORE the deploy instead of after the app crash-looped. Runs on the runner
-      # before anything touches the VPS.
-      - name: Assert required keys present in rendered env
-        if: ${{ inputs.required-keys != '' }}
-        shell: bash
-        env:
-          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-          REQUIRED_KEYS: ${{ inputs.required-keys }}
-        run: |
-          set -euo pipefail
-          missing=()
-          for k in $REQUIRED_KEYS; do
-            # Present AND non-empty: a line `KEY=` followed by at least one char.
-            grep -qE "^${k}=.+" "$DOTENV_FILE" || missing+=("$k")
-          done
-          if (( ${#missing[@]} )); then
-            echo "::error::Rendered env is missing required key(s): ${missing[*]} — refusing to deploy. Check the Infisical folder contents / render for this env." >&2
-            echo "Keys present in the rendered env:" >&2
-            grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$DOTENV_FILE" | sort >&2
-            exit 1
-          fi
-          echo "Required keys all present: $REQUIRED_KEYS"
-
-      - name: Encode rendered env file for transfer
-        id: encode-env
-        shell: bash
-        env:
-          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-        run: |
-          set -euo pipefail
-          # Single-line base64 so the whole .env rides through ssh-action's
-          # `envs:` as one variable — no scp (drone-scp breaks on the VPS login
-          # shell's `mise` stderr), no quoting issues. Masked since it is secrets.
-          b64="$(base64 -w0 "$DOTENV_FILE")"
-          echo "::add-mask::$b64"
-          echo "b64=$b64" >> "$GITHUB_OUTPUT"
-
-      - name: Load infra secrets from Infisical (env mode)
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
-        with:
-          method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.shared-project-slug }}
-          environment: ${{ inputs.env-slug }}
-          path: ${{ inputs.infra-path }}
-          # Shared folders organize creds in subfolders (e.g. /tailscale/*), so
-          # sweep recursively — matches the original per-repo deploys. Safe here
-          # because it's a narrow purpose folder, not the project root.
-          recursive: 'true'
-          include-imports: 'true'
-          export-as-env: 'true'
-
-      - name: Connect to Tailscale
-        uses: aretecp/github-actions/actions/tailscale-connect@v1
-        with:
-          authkey: ${{ env.TAILSCALE_AUTHKEY }}
-
-      # Checkout MUST run before the env-file write — the write targets
-      # repo-dir, which dev first-clone creates here.
-      - name: Prepare repo checkout on VPS
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          REPO_DIR: ${{ inputs.repo-dir }}
-          REPO_URL: ${{ inputs.repo-url }}
-          REF: ${{ inputs.ref }}
-          ALLOW_CLONE: ${{ inputs.allow-clone }}
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,REPO_URL,REF,ALLOW_CLONE
-          script: |
-            set -euo pipefail
-
-            if [[ ! -d "$REPO_DIR/.git" ]]; then
-              if [[ "$ALLOW_CLONE" != "true" ]]; then
-                echo "ERROR: repo-dir '$REPO_DIR' does not contain a git checkout and allow-clone is false." >&2
-                echo "For prod deploys the checkout must already exist on the VPS." >&2
-                exit 1
-              fi
-              echo "Cloning $REPO_URL into $REPO_DIR..."
-              git clone "$REPO_URL" "$REPO_DIR"
-            fi
-
-            cd "$REPO_DIR"
-            echo "Fetching and checking out $REF..."
-            git fetch --prune --tags --force origin
-            git checkout --force "$REF"
-            # Fast-forward only when on a branch; tags/detached HEAD are already
-            # at the right commit and a pull would be meaningless or fail.
-            if git symbolic-ref -q HEAD >/dev/null; then
-              git pull --ff-only origin "$REF"
-            fi
-
-      # Write the env file over ssh (not scp): drone-scp fails on this VPS
-      # because the login shell emits `mise` warnings to stderr. ssh-action
-      # tolerates that (the checkout step above uses it successfully). The
-      # base64 blob rides in via `envs:` and is decoded on the VPS.
-      - name: Write env file to VPS
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          REPO_DIR: ${{ inputs.repo-dir }}
-          ENV_FILE_NAME: ${{ inputs.env-file-name }}
-          ENV_FILE_B64: ${{ steps.encode-env.outputs.b64 }}
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,ENV_FILE_NAME,ENV_FILE_B64
-          script: |
-            set -euo pipefail
-            TARGET="$REPO_DIR/$ENV_FILE_NAME"
-            printf '%s' "$ENV_FILE_B64" | base64 -d > "$TARGET"
-            chmod 600 "$TARGET"
-            if [[ ! -s "$TARGET" ]]; then
-              echo "::error::Env file is empty at $TARGET after decode." >&2
-              exit 1
-            fi
-            echo "Wrote $TARGET ($(grep -c '=' "$TARGET") vars)."
-
-      # First-class pre-deploy DB backup. Runs before compose recreates
-      # containers so a corrupt/failed deploy is recoverable. No-op when
-      # db-type=none, skip-pre-deploy=true, or the DB container isn't running
-      # yet (first deploy / recovery).
-      - name: Pre-deploy DB backup
-        if: ${{ inputs.db-type != 'none' && !inputs.skip-pre-deploy }}
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          DB_TYPE: ${{ inputs.db-type }}
-          DB_CONTAINER: ${{ inputs.db-container }}
-          DB_PATH: ${{ inputs.db-path }}
-          DB_NAME: ${{ inputs.db-name }}
-          DB_USER: ${{ inputs.db-user }}
-          REPO_DIR: ${{ inputs.repo-dir }}
-          SNAPSHOT_DIR: ${{ inputs.snapshot-dir }}
-          RETENTION_DAYS: ${{ inputs.snapshot-retention-days }}
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          envs: DB_TYPE,DB_CONTAINER,DB_PATH,DB_NAME,DB_USER,REPO_DIR,SNAPSHOT_DIR,RETENTION_DAYS
-          command_timeout: 5m
-          script: |
-            set -euo pipefail
-
-            if [[ -z "$DB_CONTAINER" ]]; then
-              echo "::error::db-type=$DB_TYPE requires db-container." >&2
-              exit 1
-            fi
-
-            # Only back up when the DB container is cleanly RUNNING. A
-            # crash-looping container shows up in `docker ps` as "restarting"
-            # but `docker exec` into it fails — so check actual state, not mere
-            # presence. Absent / restarting / exited / created → skip cleanly
-            # (the deploy will recreate it). This means recovery deploys do NOT
-            # need the break-glass skip just because the API is down.
-            state="$(docker inspect -f '{{.State.Status}}' "$DB_CONTAINER" 2>/dev/null || echo absent)"
-            if [[ "$state" != "running" ]]; then
-              echo "DB container '$DB_CONTAINER' is '$state' (not cleanly running) — skipping pre-deploy backup; the deploy will recreate it."
-              exit 0
-            fi
-
-            TS=$(date -u +%Y%m%dT%H%M%SZ)
-
-            case "$DB_TYPE" in
-              sqlite)
-                if [[ -z "$DB_PATH" ]]; then
-                  echo "::error::db-type=sqlite requires db-path." >&2
-                  exit 1
-                fi
-                # Snapshot dir lives INSIDE the container on the data volume.
-                SNAP_DIR="${SNAPSHOT_DIR:-$(dirname "$DB_PATH")/pre-deploy-snapshots}"
-                echo "SQLite integrity-check + WAL-safe snapshot of $DB_PATH → $SNAP_DIR (container $DB_CONTAINER)"
-                # Python fed via stdin heredoc. The heredoc body + terminator
-                # sit at the script block's BASE column (12 spaces) so YAML
-                # dedent lands the Python at column 0 — a `python -c` nested
-                # deeper would dedent to a leading indent → IndentationError.
-                docker exec -i -e DB_PATH="$DB_PATH" -e SNAP_DIR="$SNAP_DIR" -e TS="$TS" -e RETENTION_DAYS="$RETENTION_DAYS" "$DB_CONTAINER" python - <<'PYEOF'
-            import sqlite3, os, time
-            db = os.environ["DB_PATH"]; snap_dir = os.environ["SNAP_DIR"]
-            ts = os.environ["TS"]; retention = int(os.environ["RETENTION_DAYS"])
-            src = sqlite3.connect(db)
-            integ = src.execute("PRAGMA integrity_check").fetchone()[0]
-            print("main_integrity:", integ)
-            assert integ == "ok", f"Main DB integrity failed: {integ}"
-            os.makedirs(snap_dir, exist_ok=True)
-            src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            snap = os.path.join(snap_dir, f"pre-deploy-{ts}.db")
-            dst = sqlite3.connect(snap); src.backup(dst)
-            snap_integ = dst.execute("PRAGMA integrity_check").fetchone()[0]
-            print("snap_integrity:", snap_integ)
-            assert snap_integ == "ok", f"Snapshot integrity failed: {snap_integ}"
-            dst.close(); src.close(); print("snapshot:", snap)
-            cutoff = time.time() - retention * 86400; pruned = 0
-            for f in os.listdir(snap_dir):
-                if f.startswith("pre-deploy-") and f.endswith(".db"):
-                    p = os.path.join(snap_dir, f)
-                    if os.stat(p).st_mtime < cutoff:
-                        os.remove(p); pruned += 1
-            print("pruned:", pruned)
-            PYEOF
-                ;;
-              postgres)
-                if [[ -z "$DB_NAME" || -z "$DB_USER" ]]; then
-                  echo "::error::db-type=postgres requires db-name and db-user." >&2
-                  exit 1
-                fi
-                # Snapshot dir lives on the VPS HOST under repo-dir.
-                SNAP_DIR="${SNAPSHOT_DIR:-$REPO_DIR/pre-deploy-snapshots}"
-                mkdir -p "$SNAP_DIR"
-                echo "Postgres pg_isready + pg_dump of $DB_NAME → $SNAP_DIR (container $DB_CONTAINER)"
-                docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME"
-                SNAP="$SNAP_DIR/pre-deploy-$TS.sql.gz"
-                # pg_dump streams to the host file; gzip on the host. set -o
-                # pipefail ensures a pg_dump failure fails the step.
-                docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$SNAP"
-                if [[ ! -s "$SNAP" ]]; then
-                  echo "::error::pg_dump produced an empty snapshot at $SNAP." >&2
-                  exit 1
-                fi
-                echo "snapshot: $SNAP ($(du -h "$SNAP" | cut -f1))"
-                find "$SNAP_DIR" -name 'pre-deploy-*.sql.gz' -mtime "+$RETENTION_DAYS" -delete
-                echo "pruned snapshots older than ${RETENTION_DAYS}d"
-                ;;
-              *)
-                echo "::error::Unknown db-type '$DB_TYPE' (expected sqlite|postgres|none)." >&2
-                exit 1
-                ;;
-            esac
-
-      - name: Docker Compose up on VPS
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          REPO_DIR: ${{ inputs.repo-dir }}
-          COMPOSE_FILE: ${{ inputs.compose-file }}
-          ENV_FILE_NAME: ${{ inputs.env-file-name }}
-          COMPOSE_BUILD: ${{ inputs.compose-build }}
-          COMPOSE_FORCE_RECREATE: ${{ inputs.compose-force-recreate }}
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE
-          script: |
-            set -euo pipefail
-            cd "$REPO_DIR"
-
-            # Assemble `up` flags. There is intentionally NO --remove-orphans:
-            # on a shared VPS it would delete other stacks' containers (Traefik,
-            # or the prod project that shares this dir). See the input section.
-            UP_FLAGS=(-d)
-            [[ "$COMPOSE_BUILD" == "true" ]] && UP_FLAGS+=(--build)
-            [[ "$COMPOSE_FORCE_RECREATE" == "true" ]] && UP_FLAGS+=(--force-recreate)
-
-            echo "Starting services: compose=$COMPOSE_FILE env=$ENV_FILE_NAME flags=${UP_FLAGS[*]}"
-            if [[ "$COMPOSE_BUILD" != "true" ]]; then
-              # Not building from source — pull pre-built images first.
-              docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" pull
-            fi
-            docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" up "${UP_FLAGS[@]}"
-
-      - name: Wait for containers to become healthy
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          REPO_DIR: ${{ inputs.repo-dir }}
-          COMPOSE_FILE: ${{ inputs.compose-file }}
-          ENV_FILE_NAME: ${{ inputs.env-file-name }}
-          HEALTHCHECK_CONTAINERS: ${{ inputs.healthcheck-containers }}
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,HEALTHCHECK_CONTAINERS
-          command_timeout: 5m
-          script: |
-            set -euo pipefail
-            # Fetch wait-for-healthy.sh pinned to this workflow's major tag (v2).
-            # Do NOT use github.ref_name — in a reusable workflow that resolves to
-            # the CALLER's ref (e.g. a consumer's `develop`), which 404s here.
-            # Bump this tag when cutting a new major of the shared workflow.
-            curl -fsSL \
-              "https://raw.githubusercontent.com/aretecp/github-actions/v2/scripts/wait-for-healthy.sh" \
-              | COMPOSE_FILE="$REPO_DIR/$COMPOSE_FILE" \
-                ENV_FILE="$REPO_DIR/$ENV_FILE_NAME" \
-                bash -s -- $HEALTHCHECK_CONTAINERS
+          infisical-identity-id: ${{ inputs.infisical-identity-id }}
+          shared-project-slug: ${{ inputs.shared-project-slug }}
+          app-project-slug: ${{ inputs.app-project-slug }}
+          env-slug: ${{ inputs.env-slug }}
+          app-path: ${{ inputs.app-path }}
+          extra-shared-path-1: ${{ inputs.extra-shared-path-1 }}
+          extra-shared-path-2: ${{ inputs.extra-shared-path-2 }}
+          extra-shared-path-3: ${{ inputs.extra-shared-path-3 }}
+          infra-path: ${{ inputs.infra-path }}
+          vps-user: ${{ inputs.vps-user }}
+          repo-dir: ${{ inputs.repo-dir }}
+          repo-url: ${{ inputs.repo-url }}
+          compose-file: ${{ inputs.compose-file }}
+          compose-build: ${{ inputs.compose-build }}
+          env-file-name: ${{ inputs.env-file-name }}
+          ref: ${{ inputs.ref }}
+          allow-clone: ${{ inputs.allow-clone }}
+          healthcheck-containers: ${{ inputs.healthcheck-containers }}
+          required-keys: ${{ inputs.required-keys }}
+          compose-force-recreate: ${{ inputs.compose-force-recreate }}
+          db-type: ${{ inputs.db-type }}
+          db-container: ${{ inputs.db-container }}
+          db-path: ${{ inputs.db-path }}
+          db-name: ${{ inputs.db-name }}
+          db-user: ${{ inputs.db-user }}
+          snapshot-dir: ${{ inputs.snapshot-dir }}
+          snapshot-retention-days: ${{ inputs.snapshot-retention-days }}
+          skip-pre-deploy: ${{ inputs.skip-pre-deploy }}
