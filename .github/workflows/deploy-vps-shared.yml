@@ -284,10 +284,11 @@ jobs:
           REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          # Strip leading 'v' from tags (v1.2.3 → 1.2.3) for VERSION.
+          # Use the ref verbatim (e.g. tag `v1.2.3` stays `v1.2.3`) to match the
+          # existing per-repo heredocs — apps may parse the exact string.
           # VERSION is NOT a secret — do not ::add-mask:: it (masking a value
           # like "main" would redact that word from every log line).
-          VERSION="${REF#v}"
+          VERSION="$REF"
           printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
           echo "Appended VERSION=${VERSION} to dotenv file"
 
