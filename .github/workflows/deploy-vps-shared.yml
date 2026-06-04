@@ -1,0 +1,639 @@
+name: Deploy to VPS (shared)
+
+# Reusable deploy workflow for Areté consumer repos that deploy to a
+# Tailscale-reachable VPS via Docker Compose. Each consumer's deploy workflow
+# becomes a thin shim that calls this with:
+#   uses: aretecp/github-actions/.github/workflows/deploy-vps-shared.yml@v2
+#
+# Behavior:
+#   1. Load the app Infisical folder in dotenv mode → render a bare KEY=value
+#      .env file; append deploy-computed VERSION.
+#   2. Load the infra/deploy folder (default: /tailscale) in env mode — yields
+#      TAILSCALE_AUTHKEY, VPS_TAILSCALE_IP, VPS_SSH_KEY. Never written to the
+#      app .env.
+#   3. Connect to the Tailscale tailnet via tailscale-connect@v1.
+#   4. SCP the rendered env file to the VPS (appleboy/scp-action).
+#   5. allow-clone gate: dev may clone; prod refuses clone (requires existing
+#      checkout on the VPS).
+#   6. docker compose --env-file <env-file-name> up -d --pull always
+#   7. scripts/wait-for-healthy.sh over healthcheck-containers.
+#
+# Scope: deploy-from-scratch only (v2). Rollback and copy-prod-db are a
+# fast-follow, not covered here.
+#
+# REQUIRED CALLER PERMISSIONS
+# ---------------------------
+# The job below requests these permissions. GHA reusable workflows can
+# only USE permissions the caller has GRANTED — without this block the
+# call fails at startup with "is requesting '...', but is only allowed
+# '...'". Copy verbatim into the calling shim (at workflow or job level):
+#
+#   permissions:
+#     id-token: write
+#     contents: read
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          GitHub environment name (e.g. `dev`, `prod`). Controls GH environment
+          protection rules and approval gates.
+        required: true
+        type: string
+
+      infisical-identity-id:
+        description: >-
+          Infisical OIDC machine identity UUID. Safe to store as a non-secret
+          org variable (e.g. `vars.INFISICAL_OIDC_IDENTITY_ID`).
+        required: true
+        type: string
+
+      shared-project-slug:
+        description: >-
+          Infisical project slug holding shared dependencies and the infra/deploy
+          folder (e.g. `arete-shared`).
+        required: true
+        type: string
+
+      app-project-slug:
+        description: >-
+          Infisical project slug holding the app-specific secrets folder
+          (e.g. `arete-internal`).
+        required: true
+        type: string
+
+      env-slug:
+        description: >-
+          Infisical environment slug (`dev`, `prod`, etc.). Applied to both
+          Infisical loads.
+        required: true
+        type: string
+
+      app-path:
+        description: >-
+          Primary Infisical folder path (in app-project-slug) for this app's
+          secrets, rendered into the dotenv file. `include-imports: true` also
+          folds in any Infisical imports configured on the folder.
+        required: true
+        type: string
+
+      extra-shared-path-1:
+        description: >-
+          Optional ADDITIONAL folder (in shared-project-slug) to render into the
+          app `.env` — e.g. `/teams` or `/aws/accounts/arete/ses-sender-user`.
+          For shared app secrets that several services consume. On a key
+          conflict the primary `app-path` folder WINS (it is merged last).
+          Empty (default) = not loaded.
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-2:
+        description: 'Second optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-3:
+        description: 'Third optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      infra-path:
+        description: >-
+          Infisical folder path for deploy/infra credentials in the shared
+          project. Loaded in env mode — credentials are available to the job
+          but are NEVER written to the app dotenv file. Defaults to `/tailscale`
+          (the existing shared infra folder that holds TAILSCALE_AUTHKEY,
+          VPS_TAILSCALE_IP, VPS_SSH_KEY).
+        required: false
+        type: string
+        default: /tailscale
+
+      vps-user:
+        description: SSH user on the VPS (e.g. `ubuntu`, `deploy`).
+        required: true
+        type: string
+
+      repo-dir:
+        description: >-
+          Absolute path to the app checkout directory on the VPS
+          (e.g. `/srv/areteos`).
+        required: true
+        type: string
+
+      repo-url:
+        description: >-
+          Git clone URL for the app repository. Used only when `allow-clone:
+          true` (dev). Ignored in prod.
+        required: false
+        type: string
+        default: ''
+
+      compose-file:
+        description: >-
+          Docker Compose file to use on the VPS (e.g. `docker-compose.prod.yml`,
+          `docker-compose.dev.yml`). Relative to `repo-dir`.
+        required: true
+        type: string
+
+      compose-build:
+        description: >-
+          `true` (default) — build images from source on the VPS
+          (`up -d --build`); use this for apps whose compose file has `build:`
+          stanzas (all current Areté services). `false` — `pull` pre-built
+          images then `up -d` without building.
+        required: false
+        type: boolean
+        default: true
+
+      env-file-name:
+        description: >-
+          Filename for the rendered env file on the VPS, relative to `repo-dir`.
+          Convention: `.env` for prod, `.env.dev` for dev.
+        required: false
+        type: string
+        default: .env
+
+      ref:
+        description: >-
+          Git branch or tag to deploy (e.g. `main`, `v1.2.3`). Checked out
+          on the VPS when `allow-clone: true`.
+        required: false
+        type: string
+        default: main
+
+      allow-clone:
+        description: >-
+          `true` — the workflow may clone the repo on the VPS if the directory
+          does not exist. Set `true` for dev. `false` (default, prod) — refuses
+          to clone; the checkout must already exist. This ensures prod deploys
+          never silently create a fresh checkout when the dir is accidentally
+          missing.
+        required: false
+        type: boolean
+        default: false
+
+      healthcheck-containers:
+        description: >-
+          Space-separated list of Docker container names to pass to
+          `scripts/wait-for-healthy.sh`. All listed containers must reach
+          `healthy` status before the job succeeds.
+        required: true
+        type: string
+
+      compose-force-recreate:
+        description: >-
+          `true` — pass `--force-recreate` to `compose up`. Avoids a race where
+          a fixed `container_name` can't be reclaimed fast enough during rolling
+          replacement, leaving a hash-prefixed container name that breaks
+          health-inspect and Traefik routing. Default `false`.
+        required: false
+        type: boolean
+        default: false
+
+      compose-remove-orphans:
+        description: >-
+          `true` — pass `--remove-orphans` to `compose up`. ⚠️ DANGEROUS on a
+          VPS that runs Traefik (or anything) in a SEPARATE compose stack: the
+          app's compose would treat it as an orphan and delete it, taking the
+          reverse proxy down with it. Default `false` — leave it off unless this
+          compose project owns every container on the box.
+        required: false
+        type: boolean
+        default: false
+
+      # --- Pre-deploy DB backup (first-class) -------------------------------
+      # Runs after checkout, before `compose up`. Snapshots the live DB so a
+      # bad migration / recreate can be recovered. Skipped cleanly on the first
+      # deploy (container not yet running) and via `skip-pre-deploy`.
+      db-type:
+        description: >-
+          `none` (default) — no pre-deploy backup. `sqlite` — integrity-check +
+          WAL-safe `.backup()` of a SQLite file inside `db-container`.
+          `postgres` — `pg_dump` of `db-name` from `db-container`.
+        required: false
+        type: string
+        default: none
+
+      db-container:
+        description: >-
+          Container that holds (sqlite) or serves (postgres) the DB. For sqlite
+          this is whatever container mounts the data volume (often the app
+          container); for postgres it's the database container. Required when
+          `db-type` is not `none`.
+        required: false
+        type: string
+        default: ''
+
+      db-path:
+        description: >-
+          SQLite only: absolute path to the `.db` file inside `db-container`
+          (e.g. `/app/data/bd_tracker.db`).
+        required: false
+        type: string
+        default: ''
+
+      db-name:
+        description: 'Postgres only: database name to dump.'
+        required: false
+        type: string
+        default: ''
+
+      db-user:
+        description: 'Postgres only: database user for `pg_dump`.'
+        required: false
+        type: string
+        default: ''
+
+      snapshot-dir:
+        description: >-
+          Directory for pre-deploy snapshots. sqlite: a path INSIDE the
+          container on the data volume (default `<dirname of db-path>/pre-deploy-snapshots`).
+          postgres: a path on the VPS HOST under repo-dir
+          (default `<repo-dir>/pre-deploy-snapshots`). Either way it must be on
+          persistent storage, not ephemeral.
+        required: false
+        type: string
+        default: ''
+
+      snapshot-retention-days:
+        description: 'Prune pre-deploy snapshots older than this many days. Default 7.'
+        required: false
+        type: number
+        default: 7
+
+      skip-pre-deploy:
+        description: >-
+          Break-glass: `true` skips the pre-deploy DB backup entirely. Wire this
+          to a `workflow_dispatch` input so operators can recover from a broken
+          API without the backup step blocking the deploy. Default `false`.
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Load app secrets from Infisical (dotenv mode)
+        id: load-app-secrets
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.app-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.app-path }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          # Render to a temp file whose basename IS the target env filename, so
+          # scp-action (which treats `target` as a directory and keeps the
+          # source basename) lands it at repo-dir/<env-file-name>.
+          dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
+
+      # Optional additional shared folders rendered into the same .env. Each is
+      # its own conditional step (a reusable workflow can't loop `uses:`); the
+      # merge step below concatenates them with the primary app folder LAST so
+      # it wins on any duplicate key.
+      - name: Load extra shared folder 1 (dotenv mode)
+        id: extra-1
+        if: ${{ inputs.extra-shared-path-1 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-1 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-1.env
+
+      - name: Load extra shared folder 2 (dotenv mode)
+        id: extra-2
+        if: ${{ inputs.extra-shared-path-2 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-2 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-2.env
+
+      - name: Load extra shared folder 3 (dotenv mode)
+        id: extra-3
+        if: ${{ inputs.extra-shared-path-3 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-3 }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
+
+      - name: Merge extra shared folders into the env file
+        if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' }}
+        shell: bash
+        env:
+          APP_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          E1: ${{ steps.extra-1.outputs.dotenv-file-path }}
+          E2: ${{ steps.extra-2.outputs.dotenv-file-path }}
+          E3: ${{ steps.extra-3.outputs.dotenv-file-path }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          # Extras first, primary app folder LAST → app wins on duplicate keys.
+          for f in "$E1" "$E2" "$E3"; do
+            [[ -n "$f" && -f "$f" ]] && cat "$f" >> "$tmp"
+          done
+          cat "$APP_FILE" >> "$tmp"
+          mv "$tmp" "$APP_FILE"
+          echo "Merged extra shared folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
+
+      - name: Append VERSION to dotenv file
+        shell: bash
+        env:
+          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # Use the ref verbatim (e.g. tag `v1.2.3` stays `v1.2.3`) to match the
+          # existing per-repo heredocs — apps may parse the exact string.
+          # VERSION is NOT a secret — do not ::add-mask:: it (masking a value
+          # like "main" would redact that word from every log line).
+          VERSION="$REF"
+          printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
+          echo "Appended VERSION=${VERSION} to dotenv file"
+
+      - name: Load infra secrets from Infisical (env mode)
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.infra-path }}
+          include-imports: 'true'
+          export-as-env: 'true'
+
+      - name: Connect to Tailscale
+        uses: aretecp/github-actions/actions/tailscale-connect@v1
+        with:
+          authkey: ${{ env.TAILSCALE_AUTHKEY }}
+
+      # Checkout MUST run before the scp — scp-action's `target` is a directory
+      # that has to already exist on the VPS (dev first-clone creates it here).
+      - name: Prepare repo checkout on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          REPO_URL: ${{ inputs.repo-url }}
+          REF: ${{ inputs.ref }}
+          ALLOW_CLONE: ${{ inputs.allow-clone }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,REPO_URL,REF,ALLOW_CLONE
+          script: |
+            set -euo pipefail
+
+            if [[ ! -d "$REPO_DIR/.git" ]]; then
+              if [[ "$ALLOW_CLONE" != "true" ]]; then
+                echo "ERROR: repo-dir '$REPO_DIR' does not contain a git checkout and allow-clone is false." >&2
+                echo "For prod deploys the checkout must already exist on the VPS." >&2
+                exit 1
+              fi
+              echo "Cloning $REPO_URL into $REPO_DIR..."
+              git clone "$REPO_URL" "$REPO_DIR"
+            fi
+
+            cd "$REPO_DIR"
+            echo "Fetching and checking out $REF..."
+            git fetch --prune --tags --force origin
+            git checkout --force "$REF"
+            # Fast-forward only when on a branch; tags/detached HEAD are already
+            # at the right commit and a pull would be meaningless or fail.
+            if git symbolic-ref -q HEAD >/dev/null; then
+              git pull --ff-only origin "$REF"
+            fi
+
+      - name: SCP rendered env file to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          # `target` is a DIRECTORY; scp-action keeps the source basename, which
+          # we set to env-file-name via dotenv-output-path above. File lands at
+          # repo-dir/<env-file-name>.
+          source: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          target: ${{ inputs.repo-dir }}/
+          strip_components: 999
+
+      # Guard the scp landing spot. `strip_components: 999` is the common idiom
+      # for flattening a single source file to its basename in `target`, but the
+      # action does not document the count-exceeds-depth edge case — so we assert
+      # the env file actually arrived at repo-dir/<env-file-name>, non-empty,
+      # rather than risk bringing up a container with a missing/empty .env.
+      - name: Verify env file landed on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,ENV_FILE_NAME
+          script: |
+            set -euo pipefail
+            TARGET="$REPO_DIR/$ENV_FILE_NAME"
+            if [[ ! -f "$TARGET" ]]; then
+              echo "::error::Expected env file not found at $TARGET — scp likely flattened the path differently than expected (check scp-action strip_components)." >&2
+              echo "Contents of $REPO_DIR:" >&2
+              ls -la "$REPO_DIR" >&2 || true
+              exit 1
+            fi
+            if [[ ! -s "$TARGET" ]]; then
+              echo "::error::Env file $TARGET is empty." >&2
+              exit 1
+            fi
+            chmod 600 "$TARGET"
+            echo "Verified $TARGET ($(wc -l < "$TARGET") vars)."
+
+      # First-class pre-deploy DB backup. Runs before compose recreates
+      # containers so a corrupt/failed deploy is recoverable. No-op when
+      # db-type=none, skip-pre-deploy=true, or the DB container isn't running
+      # yet (first deploy / recovery).
+      - name: Pre-deploy DB backup
+        if: ${{ inputs.db-type != 'none' && !inputs.skip-pre-deploy }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DB_TYPE: ${{ inputs.db-type }}
+          DB_CONTAINER: ${{ inputs.db-container }}
+          DB_PATH: ${{ inputs.db-path }}
+          DB_NAME: ${{ inputs.db-name }}
+          DB_USER: ${{ inputs.db-user }}
+          REPO_DIR: ${{ inputs.repo-dir }}
+          SNAPSHOT_DIR: ${{ inputs.snapshot-dir }}
+          RETENTION_DAYS: ${{ inputs.snapshot-retention-days }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: DB_TYPE,DB_CONTAINER,DB_PATH,DB_NAME,DB_USER,REPO_DIR,SNAPSHOT_DIR,RETENTION_DAYS
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+
+            if [[ -z "$DB_CONTAINER" ]]; then
+              echo "::error::db-type=$DB_TYPE requires db-container." >&2
+              exit 1
+            fi
+
+            # First deploy / recovery: DB container not up yet → skip cleanly.
+            if ! docker ps --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
+              echo "DB container '$DB_CONTAINER' not running — first deploy or recovery. Skipping backup."
+              exit 0
+            fi
+
+            TS=$(date -u +%Y%m%dT%H%M%SZ)
+
+            case "$DB_TYPE" in
+              sqlite)
+                if [[ -z "$DB_PATH" ]]; then
+                  echo "::error::db-type=sqlite requires db-path." >&2
+                  exit 1
+                fi
+                # Snapshot dir lives INSIDE the container on the data volume.
+                SNAP_DIR="${SNAPSHOT_DIR:-$(dirname "$DB_PATH")/pre-deploy-snapshots}"
+                echo "SQLite integrity-check + WAL-safe snapshot of $DB_PATH → $SNAP_DIR (container $DB_CONTAINER)"
+                # Python fed via stdin heredoc. The heredoc body + terminator
+                # sit at the script block's BASE column (12 spaces) so YAML
+                # dedent lands the Python at column 0 — a `python -c` nested
+                # deeper would dedent to a leading indent → IndentationError.
+                docker exec -i -e DB_PATH="$DB_PATH" -e SNAP_DIR="$SNAP_DIR" -e TS="$TS" -e RETENTION_DAYS="$RETENTION_DAYS" "$DB_CONTAINER" python - <<'PYEOF'
+            import sqlite3, os, time
+            db = os.environ["DB_PATH"]; snap_dir = os.environ["SNAP_DIR"]
+            ts = os.environ["TS"]; retention = int(os.environ["RETENTION_DAYS"])
+            src = sqlite3.connect(db)
+            integ = src.execute("PRAGMA integrity_check").fetchone()[0]
+            print("main_integrity:", integ)
+            assert integ == "ok", f"Main DB integrity failed: {integ}"
+            os.makedirs(snap_dir, exist_ok=True)
+            src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            snap = os.path.join(snap_dir, f"pre-deploy-{ts}.db")
+            dst = sqlite3.connect(snap); src.backup(dst)
+            snap_integ = dst.execute("PRAGMA integrity_check").fetchone()[0]
+            print("snap_integrity:", snap_integ)
+            assert snap_integ == "ok", f"Snapshot integrity failed: {snap_integ}"
+            dst.close(); src.close(); print("snapshot:", snap)
+            cutoff = time.time() - retention * 86400; pruned = 0
+            for f in os.listdir(snap_dir):
+                if f.startswith("pre-deploy-") and f.endswith(".db"):
+                    p = os.path.join(snap_dir, f)
+                    if os.stat(p).st_mtime < cutoff:
+                        os.remove(p); pruned += 1
+            print("pruned:", pruned)
+            PYEOF
+                ;;
+              postgres)
+                if [[ -z "$DB_NAME" || -z "$DB_USER" ]]; then
+                  echo "::error::db-type=postgres requires db-name and db-user." >&2
+                  exit 1
+                fi
+                # Snapshot dir lives on the VPS HOST under repo-dir.
+                SNAP_DIR="${SNAPSHOT_DIR:-$REPO_DIR/pre-deploy-snapshots}"
+                mkdir -p "$SNAP_DIR"
+                echo "Postgres pg_isready + pg_dump of $DB_NAME → $SNAP_DIR (container $DB_CONTAINER)"
+                docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME"
+                SNAP="$SNAP_DIR/pre-deploy-$TS.sql.gz"
+                # pg_dump streams to the host file; gzip on the host. set -o
+                # pipefail ensures a pg_dump failure fails the step.
+                docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$SNAP"
+                if [[ ! -s "$SNAP" ]]; then
+                  echo "::error::pg_dump produced an empty snapshot at $SNAP." >&2
+                  exit 1
+                fi
+                echo "snapshot: $SNAP ($(du -h "$SNAP" | cut -f1))"
+                find "$SNAP_DIR" -name 'pre-deploy-*.sql.gz' -mtime "+$RETENTION_DAYS" -delete
+                echo "pruned snapshots older than ${RETENTION_DAYS}d"
+                ;;
+              *)
+                echo "::error::Unknown db-type '$DB_TYPE' (expected sqlite|postgres|none)." >&2
+                exit 1
+                ;;
+            esac
+
+      - name: Docker Compose up on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          COMPOSE_BUILD: ${{ inputs.compose-build }}
+          COMPOSE_FORCE_RECREATE: ${{ inputs.compose-force-recreate }}
+          COMPOSE_REMOVE_ORPHANS: ${{ inputs.compose-remove-orphans }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE,COMPOSE_REMOVE_ORPHANS
+          script: |
+            set -euo pipefail
+            cd "$REPO_DIR"
+
+            # Assemble `up` flags. --remove-orphans is OFF by default: on a VPS
+            # with Traefik (or anything) in a separate compose stack it would
+            # delete that stack as an "orphan".
+            UP_FLAGS=(-d)
+            [[ "$COMPOSE_BUILD" == "true" ]] && UP_FLAGS+=(--build)
+            [[ "$COMPOSE_FORCE_RECREATE" == "true" ]] && UP_FLAGS+=(--force-recreate)
+            [[ "$COMPOSE_REMOVE_ORPHANS" == "true" ]] && UP_FLAGS+=(--remove-orphans)
+
+            echo "Starting services: compose=$COMPOSE_FILE env=$ENV_FILE_NAME flags=${UP_FLAGS[*]}"
+            if [[ "$COMPOSE_BUILD" != "true" ]]; then
+              # Not building from source — pull pre-built images first.
+              docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" pull
+            fi
+            docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" up "${UP_FLAGS[@]}"
+
+      - name: Wait for containers to become healthy
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          HEALTHCHECK_CONTAINERS: ${{ inputs.healthcheck-containers }}
+          GH_ACTIONS_REF: ${{ github.ref_name }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,HEALTHCHECK_CONTAINERS,GH_ACTIONS_REF
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            # Fetch wait-for-healthy.sh from the same ref that was deployed,
+            # so the script version always matches the action version.
+            curl -fsSL \
+              "https://raw.githubusercontent.com/aretecp/github-actions/${GH_ACTIONS_REF}/scripts/wait-for-healthy.sh" \
+              | COMPOSE_FILE="$REPO_DIR/$COMPOSE_FILE" \
+                ENV_FILE="$REPO_DIR/$ENV_FILE_NAME" \
+                bash -s -- $HEALTHCHECK_CONTAINERS

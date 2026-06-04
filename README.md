@@ -6,16 +6,19 @@ Reusable composite actions and workflows for `aretecp` repos. Drop-in `uses:` re
 
 | Action | Description | Status |
 |---|---|---|
-| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime via Universal Auth | `v1.0.1` |
+| [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime. Supports env export, JSON output, and bare dotenv file render (v2). | `v2` (`@v1` frozen) |
 | [`tailscale-connect`](actions/tailscale-connect) | Join the Areté Tailscale tailnet. Wraps `tailscale/github-action` with a pinned SHA and corrected input names. | `v1` |
 
-More to come — Tailscale connect, Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
+More to come — Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
+
+> **`@v1` is frozen.** All existing consumers that pin `load-infisical-secrets@v1` are unaffected. The v2 `dotenv` render mode is additive — migrate one repo at a time via the [VPS deploy migration runbook](docs/runbooks/deploy-vps-migration.md).
 
 ## Available reusable workflows
 
 | Workflow | Description | Status |
 |---|---|---|
 | [`release-shared.yml`](.github/workflows/release-shared.yml) | Squash-merge → conventional-commit promotion → semantic-release → optional deploy trigger | `v1` |
+| [`deploy-vps-shared.yml`](.github/workflows/deploy-vps-shared.yml) | Render Infisical folder → dotenv → scp to VPS → docker compose up → healthcheck. Callers become ~15-line shims. | `v2` |
 | [`claude-issue-triage.yml`](.github/workflows/claude-issue-triage.yml) | Auto-triage of new issues / `@claude` comments via Claude Code. Bundled system prompt at `.claude/prompts/ci-triage.md`. | `v1` |
 | [`pr-to-main-hooks.yml`](.github/workflows/pr-to-main-hooks.yml) | On PRs targeting `main`: gather context → Claude summary → update PR body + Closes #N footers → Teams card. | `v1` |
 
