@@ -214,7 +214,19 @@ runs:
         # Best-effort cleanup. The runner is ephemeral but be tidy.
         rm -f "$SECRETS_FILE"
 
-    - name: Fetch secrets (file mode — dotenv output path)
+    # dotenv mode renders from ENV-MODE resolution, NOT the upstream file export.
+    # The upstream `export-type: file` writes `KEY='value'` with single quotes
+    # and no escaping, and was observed to silently DROP some secrets entirely
+    # (e.g. MICROSOFT_CLIENT_SECRET) while emitting their siblings. `export-type:
+    # env` resolves everything cleanly and unquoted — it's what the pre-v2 deploys
+    # used. So: snapshot exported env var names, load secrets as env vars, then
+    # diff to find exactly the keys this load added and write bare KEY=value.
+    - name: Snapshot env before dotenv load
+      if: ${{ inputs.export-as-env == 'dotenv' }}
+      shell: bash
+      run: compgen -e | sort > "$RUNNER_TEMP/infisical-dotenv-env-before.txt"
+
+    - name: Fetch secrets (env mode → dotenv render)
       if: ${{ inputs.export-as-env == 'dotenv' }}
       uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995  # v1.0.16
       with:
@@ -229,92 +241,34 @@ runs:
         domain: ${{ inputs.domain }}
         recursive: ${{ inputs.recursive }}
         include-imports: ${{ inputs.include-imports }}
-        export-type: file
-        # Upstream builds the output path by STRING-CONCAT: GITHUB_WORKSPACE +
-        # file-output-path (no path.join). So the value must start with `/` to
-        # land at <workspace>/<file>; a bare name glues on with no separator
-        # (`<ws>bd-pulseload-...`) and an absolute path doubles. The render step
-        # reads it back as ${{ github.workspace }}/<same file>.
-        file-output-path: /load-infisical-secrets-dotenv.env
+        export-type: env
 
-    - name: Render bare dotenv file
+    - name: Render dotenv from loaded env
       id: dotenv
       if: ${{ inputs.export-as-env == 'dotenv' }}
       shell: bash
       env:
-        SECRETS_FILE: ${{ github.workspace }}/load-infisical-secrets-dotenv.env
         DOTENV_OUTPUT_PATH: ${{ inputs.dotenv-output-path }}
       run: |
         set -euo pipefail
-
-        if [[ ! -f "$SECRETS_FILE" ]]; then
-          echo "::error::Expected secrets file not found at $SECRETS_FILE"
-          # Self-diagnose: upstream's path handling has bitten before. Show
-          # where it might have actually written so a failure is immediately
-          # debuggable without an instrumented re-run.
-          echo "--- workspace ($GITHUB_WORKSPACE):" >&2; ls -la "$GITHUB_WORKSPACE" 2>/dev/null || true
-          echo "--- parent:" >&2; ls -la "$(dirname "$GITHUB_WORKSPACE")" 2>/dev/null || true
-          exit 1
-        fi
-
-        # Resolve output path: caller-supplied or default under runner.temp.
-        if [[ -z "$DOTENV_OUTPUT_PATH" ]]; then
-          OUT_FILE="$RUNNER_TEMP/infisical.env"
-        else
-          OUT_FILE="$DOTENV_OUTPUT_PATH"
-        fi
-
-        # Render bare KEY=value lines — no quote-wrapping.
-        # docker compose --env-file treats quotes literally, so we strip any
-        # double-quote wrapping that upstream's .env serialiser may have added.
-        # Single-line values only; multi-line secrets (PEM keys, etc.) are not
-        # supported in dotenv mode.
-        #
-        # Parse rules (matching the upstream file format):
-        #   - Skip blank lines and comment lines (# ...)
-        #   - Accept KEY=value and KEY="value" (upstream may quote)
-        #   - Strip surrounding double-quotes from value if present
-        #   - Emit as bare KEY=value
-        # IMPORTANT: only `KEY=value` lines may reach $OUT_FILE. The
-        # `::add-mask::` directives must go to the step's stdout (so the runner
-        # masks them) — NOT into the file. So append KEY=value per line and let
-        # the mask echo flow to stdout; do NOT redirect the whole loop to the
-        # file (that would write the ::add-mask:: lines into the .env and break
-        # `docker compose --env-file`).
+        OUT_FILE="${DOTENV_OUTPUT_PATH:-$RUNNER_TEMP/infisical.env}"
+        BEFORE="$RUNNER_TEMP/infisical-dotenv-env-before.txt"
         : > "$OUT_FILE"
-        while IFS= read -r line; do
-          # Skip blank lines and comments
-          [[ -z "$line" || "$line" == \#* ]] && continue
 
-          # Must look like KEY=...
-          if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-            k="${BASH_REMATCH[1]}"
-            v="${BASH_REMATCH[2]}"
+        # Newly-exported env vars since the snapshot == exactly the secrets this
+        # env-mode load injected (already resolved + unquoted + masked by the
+        # upstream action). Write them as bare KEY=value.
+        # Exclude GitHub/runner-internal names (some change per step) so only
+        # real secrets land in the file.
+        while IFS= read -r k; do
+          [[ -z "$k" ]] && continue
+          printf '%s=%s\n' "$k" "${!k}" >> "$OUT_FILE"
+        done < <(comm -13 "$BEFORE" <(compgen -e | sort) \
+                 | grep -vE '^(GITHUB_|RUNNER_|ACTIONS_|INPUT_|STATE_|CI$|HOME$|PATH$)')
 
-            # Strip ONE layer of surrounding quotes — SINGLE or double. Infisical
-            # exports values single-quoted ('value'); without stripping, the
-            # literal quotes get written into the .env and docker compose
-            # --env-file passes them verbatim into the container (so e.g.
-            # MICROSOFT_CLIENT_SECRET arrives as 'secret' and the app rejects it).
-            if [[ ${#v} -ge 2 && ( "$v" == '"'*'"' || "$v" == "'"*"'" ) ]]; then
-              v="${v:1:${#v}-2}"
-            fi
-
-            # Mask the value (to stdout/log, idempotent if upstream already did).
-            [[ -n "$v" ]] && echo "::add-mask::$v"
-
-            # Only the assignment goes to the file.
-            printf '%s=%s\n' "$k" "$v" >> "$OUT_FILE"
-          fi
-        done < "$SECRETS_FILE"
-
-        # Validate: file must be non-empty (at least one secret rendered).
         if [[ ! -s "$OUT_FILE" ]]; then
-          echo "::error::Dotenv render produced an empty file — check that the Infisical path contains secrets and include-imports is set correctly."
+          echo "::error::Dotenv render produced an empty file — the env-mode load added no secrets. Check path / env-slug / include-imports."
           exit 1
         fi
-
         echo "dotenv-file-path=$OUT_FILE" >> "$GITHUB_OUTPUT"
-
-        # Best-effort cleanup of the intermediate file.
-        rm -f "$SECRETS_FILE"
+        rm -f "$BEFORE"
