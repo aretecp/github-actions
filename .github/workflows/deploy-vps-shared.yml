@@ -617,19 +617,20 @@ jobs:
           COMPOSE_FILE: ${{ inputs.compose-file }}
           ENV_FILE_NAME: ${{ inputs.env-file-name }}
           HEALTHCHECK_CONTAINERS: ${{ inputs.healthcheck-containers }}
-          GH_ACTIONS_REF: ${{ github.ref_name }}
         with:
           host: ${{ env.VPS_TAILSCALE_IP }}
           username: ${{ inputs.vps-user }}
           key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,HEALTHCHECK_CONTAINERS,GH_ACTIONS_REF
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,HEALTHCHECK_CONTAINERS
           command_timeout: 5m
           script: |
             set -euo pipefail
-            # Fetch wait-for-healthy.sh from the same ref that was deployed,
-            # so the script version always matches the action version.
+            # Fetch wait-for-healthy.sh pinned to this workflow's major tag (v2).
+            # Do NOT use github.ref_name — in a reusable workflow that resolves to
+            # the CALLER's ref (e.g. a consumer's `develop`), which 404s here.
+            # Bump this tag when cutting a new major of the shared workflow.
             curl -fsSL \
-              "https://raw.githubusercontent.com/aretecp/github-actions/${GH_ACTIONS_REF}/scripts/wait-for-healthy.sh" \
+              "https://raw.githubusercontent.com/aretecp/github-actions/v2/scripts/wait-for-healthy.sh" \
               | COMPOSE_FILE="$REPO_DIR/$COMPOSE_FILE" \
                 ENV_FILE="$REPO_DIR/$ENV_FILE_NAME" \
                 bash -s -- $HEALTHCHECK_CONTAINERS
