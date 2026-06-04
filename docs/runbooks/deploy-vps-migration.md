@@ -223,6 +223,95 @@ The shared workflow can snapshot the live DB **before** `compose up` recreates c
 
 ---
 
+## Worked example — areteos (multi-shared-folder + Postgres)
+
+areteos is the case that exercises everything: it pulls SES (+ Teams in prod) from the shared project into the `.env`, and runs Postgres. These shims are copy-paste ready once v2 exists and the `/areteos` Infisical folder is restructured. `# REPLACE` marks values to confirm before flipping.
+
+**`deploy-dev.yml`** (loads `/areteos` + shared `/ses`; clones allowed):
+
+```yaml
+name: Deploy Dev
+on:
+  push: { branches: [develop] }
+  workflow_dispatch:
+    inputs:
+      branch: { description: Branch to deploy, required: false, default: develop }
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    uses: aretecp/github-actions/.github/workflows/deploy-vps-shared.yml@v2
+    with:
+      environment: development
+      infisical-identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      shared-project-slug: ${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}
+      app-project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+      env-slug: dev
+      app-path: /areteos
+      extra-shared-path-1: /aws/accounts/arete/ses-sender-user   # SES → .env
+      vps-user: ${{ vars.VPS_USER }}
+      repo-dir: /home/REPLACE_VPS_USER/areteos   # REPLACE: old workflow used $HOME/areteos
+      repo-url: https://github.com/aretecp/areteos.git
+      compose-file: docker-compose.dev.yml
+      env-file-name: .env.dev
+      ref: ${{ inputs.branch || github.ref_name }}
+      allow-clone: true
+      healthcheck-containers: areteos_app_dev areteos_db_dev
+      db-type: postgres
+      db-container: areteos_db_dev
+      db-name: areteos_dev      # POSTGRES_DB_DEV default
+      db-user: areteos
+```
+
+**`deploy-prod.yml`** (loads `/areteos` + shared `/teams` + `/ses`; no clone):
+
+```yaml
+name: Deploy Production
+on:
+  release: { types: [published] }
+  push: { tags: ['v[0-9]+.[0-9]+.[0-9]+'] }
+  workflow_dispatch:
+    inputs:
+      version: { description: "Version tag (e.g. v1.2.3); defaults to triggering ref.", required: false, type: string }
+concurrency: { group: deploy-prod, cancel-in-progress: false }
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    uses: aretecp/github-actions/.github/workflows/deploy-vps-shared.yml@v2
+    with:
+      environment: production
+      infisical-identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      shared-project-slug: ${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}
+      app-project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+      env-slug: prod
+      app-path: /areteos
+      extra-shared-path-1: /teams                                # Teams webhook → .env
+      extra-shared-path-2: /aws/accounts/arete/ses-sender-user   # SES → .env
+      vps-user: ${{ vars.VPS_USER }}
+      repo-dir: /home/REPLACE_VPS_USER/areteos   # REPLACE: old workflow used $HOME/areteos
+      repo-url: https://github.com/aretecp/areteos.git
+      compose-file: docker-compose.prod.yml
+      env-file-name: .env
+      ref: ${{ inputs.version || github.ref_name }}
+      allow-clone: false
+      healthcheck-containers: areteos_app areteos_db
+      db-type: postgres
+      db-container: areteos_db
+      db-name: areteos_prod
+      db-user: areteos
+```
+
+Notes specific to areteos:
+- No `compose-force-recreate` (the old areteos deploy didn't use it; add only if you hit hash-prefixed container names).
+- `compose-remove-orphans` stays default `false` — areteos's VPS also runs Traefik via labels (separate stack).
+- Confirm the Postgres `pg_dump` auth works via `docker exec` (the image's local trust auth); if it needs a password, pass `PGPASSWORD` into the container.
+- Move areteos's non-secret config (`PHX_HOST`/`PHX_HOST_DEV`, `EMAIL_FROM_ADDRESS`, `ENVIRONMENT`, `LANGFUSE_HOST`, `AUDIT_RETENTION_DAYS`) into the `/areteos` Infisical folder per Step 1.2 before flipping.
+
+---
+
 ## Rollback
 
 v2 deploy is currently deploy-from-scratch only. If a deploy produces a broken `.env`:
