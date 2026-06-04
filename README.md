@@ -18,7 +18,7 @@ More to come — Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as 
 | Workflow | Description | Status |
 |---|---|---|
 | [`release-shared.yml`](.github/workflows/release-shared.yml) | Squash-merge → conventional-commit promotion → semantic-release → optional deploy trigger | `v1` |
-| [`deploy-vps-shared.yml`](.github/workflows/deploy-vps-shared.yml) | Render Infisical folder → dotenv → scp to VPS → docker compose up → healthcheck. Callers become ~15-line shims. | `v2` |
+| [`deploy-vps-shared.yml`](.github/workflows/deploy-vps-shared.yml) | Render Infisical folder → dotenv → write to VPS over ssh → docker compose up → healthcheck. Callers become ~15-line shims. | `v2` |
 | [`claude-issue-triage.yml`](.github/workflows/claude-issue-triage.yml) | Auto-triage of new issues / `@claude` comments via Claude Code. Bundled system prompt at `.claude/prompts/ci-triage.md`. | `v1` |
 | [`pr-to-main-hooks.yml`](.github/workflows/pr-to-main-hooks.yml) | On PRs targeting `main`: gather context → Claude summary → update PR body + Closes #N footers → Teams card. | `v1` |
 
