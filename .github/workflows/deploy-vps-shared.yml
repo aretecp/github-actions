@@ -314,6 +314,7 @@ jobs:
           project-slug: ${{ inputs.shared-project-slug }}
           environment: ${{ inputs.env-slug }}
           path: ${{ inputs.extra-shared-path-1 }}
+          recursive: 'true'
           include-imports: 'true'
           export-as-env: dotenv
           dotenv-output-path: ${{ runner.temp }}/extra-shared-1.env
@@ -328,6 +329,7 @@ jobs:
           project-slug: ${{ inputs.shared-project-slug }}
           environment: ${{ inputs.env-slug }}
           path: ${{ inputs.extra-shared-path-2 }}
+          recursive: 'true'
           include-imports: 'true'
           export-as-env: dotenv
           dotenv-output-path: ${{ runner.temp }}/extra-shared-2.env
@@ -342,6 +344,7 @@ jobs:
           project-slug: ${{ inputs.shared-project-slug }}
           environment: ${{ inputs.env-slug }}
           path: ${{ inputs.extra-shared-path-3 }}
+          recursive: 'true'
           include-imports: 'true'
           export-as-env: dotenv
           dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
@@ -388,6 +391,10 @@ jobs:
           project-slug: ${{ inputs.shared-project-slug }}
           environment: ${{ inputs.env-slug }}
           path: ${{ inputs.infra-path }}
+          # Shared folders organize creds in subfolders (e.g. /tailscale/*), so
+          # sweep recursively — matches the original per-repo deploys. Safe here
+          # because it's a narrow purpose folder, not the project root.
+          recursive: 'true'
           include-imports: 'true'
           export-as-env: 'true'
 
