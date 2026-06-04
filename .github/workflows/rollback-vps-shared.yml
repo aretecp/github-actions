@@ -1,0 +1,646 @@
+name: Rollback VPS (shared)
+
+# Reusable rollback workflow for Areté consumer repos deploying to a
+# Tailscale-reachable VPS via Docker Compose. Roll back to a previous
+# version tag, optionally restoring the pre-deploy DB snapshot.
+#
+# Behavior:
+#   1. Load the app Infisical folder in dotenv mode → render .env (same as deploy).
+#   2. Load infra/deploy folder (default: /tailscale) in env mode.
+#   3. Connect to Tailscale.
+#   4. Check out the `version` tag on the VPS.
+#   5. Write rendered .env to VPS.
+#   6. (opt-in) If restore-db-snapshot=true AND confirm==RESTORE-DB:
+#        SQLite: stop container → find latest pre-deploy snapshot (FAIL if none)
+#                → move current DB aside .before-rollback-<ts> + clear WAL/SHM
+#                → copy snapshot in + chown → integrity-check.
+#        Postgres: find latest pre-deploy dump (FAIL if none) → drop + restore.
+#      If restore-db-snapshot=true but confirm != RESTORE-DB → FAIL before touching DB.
+#   7. docker compose up --build (+ optional force-recreate).
+#   8. wait-for-healthy.sh@v2 on healthcheck-containers.
+#
+# REQUIRED CALLER PERMISSIONS
+# ---------------------------
+# The job below requests these permissions. GHA reusable workflows can
+# only USE permissions the caller has GRANTED — without this block the
+# call fails at startup. Copy verbatim into the calling shim:
+#
+#   permissions:
+#     id-token: write
+#     contents: read
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          GitHub environment name (e.g. `prod`). Controls GH environment
+          protection rules and OIDC subject claim.
+        required: true
+        type: string
+
+      version:
+        description: >-
+          Git tag to roll back to (e.g. `v1.2.3`). Checked out on the VPS
+          and written as VERSION= in the env file.
+        required: true
+        type: string
+
+      restore-db-snapshot:
+        description: >-
+          `true` — also restore the DB to the most-recent pre-deploy snapshot
+          BEFORE bringing the app back up. DESTRUCTIVE: all data written since
+          the snapshot was taken is lost. Default `false`.
+          Requires `confirm: RESTORE-DB` or the restore step fails before
+          touching anything.
+        required: false
+        type: boolean
+        default: false
+
+      confirm:
+        description: >-
+          Typed confirmation for the destructive DB restore path. When
+          `restore-db-snapshot: true`, this MUST equal the literal string
+          `RESTORE-DB` or the job fails before any DB operation. Leave blank
+          (default) when not restoring.
+        required: false
+        type: string
+        default: ''
+
+      infisical-identity-id:
+        description: >-
+          Infisical OIDC machine identity UUID. Safe to store as a non-secret
+          org variable (e.g. `vars.INFISICAL_OIDC_IDENTITY_ID`).
+        required: true
+        type: string
+
+      shared-project-slug:
+        description: >-
+          Infisical project slug holding the infra/deploy folder
+          (e.g. `arete-shared`).
+        required: true
+        type: string
+
+      app-project-slug:
+        description: >-
+          Infisical project slug holding the app-specific secrets folder
+          (e.g. `arete-internal`).
+        required: true
+        type: string
+
+      env-slug:
+        description: >-
+          Infisical environment slug (`dev`, `prod`, etc.). Applied to both
+          Infisical loads.
+        required: true
+        type: string
+
+      app-path:
+        description: >-
+          Primary Infisical folder path (in app-project-slug) for this app's
+          secrets, rendered into the dotenv file.
+        required: true
+        type: string
+
+      extra-shared-path-1:
+        description: >-
+          Optional additional folder (in shared-project-slug) rendered into
+          the app `.env`. On a key conflict the primary `app-path` wins.
+          Empty (default) = not loaded.
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-2:
+        description: 'Second optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      extra-shared-path-3:
+        description: 'Third optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      infra-path:
+        description: >-
+          Infisical folder path for deploy/infra credentials in the shared
+          project. Loaded in env mode (never written to the app dotenv).
+          Defaults to `/tailscale`.
+        required: false
+        type: string
+        default: /tailscale
+
+      vps-user:
+        description: SSH user on the VPS (e.g. `ubuntu`, `deploy`).
+        required: true
+        type: string
+
+      repo-dir:
+        description: >-
+          Absolute path to the app checkout directory on the VPS
+          (e.g. `/home/sglyon/bd-pulse`).
+        required: true
+        type: string
+
+      compose-file:
+        description: >-
+          Docker Compose file to use on the VPS (e.g. `docker-compose.prod.yml`).
+          Relative to `repo-dir`.
+        required: true
+        type: string
+
+      compose-build:
+        description: >-
+          `true` (default) — build images from source (`up -d --build`).
+          `false` — pull pre-built images then `up -d`.
+        required: false
+        type: boolean
+        default: true
+
+      compose-force-recreate:
+        description: >-
+          `true` — pass `--force-recreate` to `compose up`. Default `false`.
+        required: false
+        type: boolean
+        default: false
+
+      env-file-name:
+        description: >-
+          Filename for the rendered env file on the VPS, relative to
+          `repo-dir`. Convention: `.env` for prod, `.env.dev` for dev.
+        required: false
+        type: string
+        default: .env
+
+      healthcheck-containers:
+        description: >-
+          Space-separated list of Docker container names to pass to
+          `scripts/wait-for-healthy.sh`. All must reach `healthy` status.
+        required: true
+        type: string
+
+      # --- DB restore inputs (used only when restore-db-snapshot=true) -------
+
+      db-type:
+        description: >-
+          `none` (default) — no DB restore. `sqlite` — restore from the most
+          recent `pre-deploy-*.db` snapshot. `postgres` — restore from the most
+          recent `pre-deploy-*.sql.gz` dump. Ignored when
+          `restore-db-snapshot: false`.
+        required: false
+        type: string
+        default: none
+
+      db-container:
+        description: >-
+          Container that holds (sqlite) or serves (postgres) the DB. Required
+          when `db-type` is not `none`.
+        required: false
+        type: string
+        default: ''
+
+      db-path:
+        description: >-
+          SQLite only: absolute path to the `.db` file INSIDE `db-container`
+          (e.g. `/app/data/bd_tracker.db`).
+        required: false
+        type: string
+        default: ''
+
+      db-name:
+        description: 'Postgres only: database name.'
+        required: false
+        type: string
+        default: ''
+
+      db-user:
+        description: 'Postgres only: database superuser for pg_restore.'
+        required: false
+        type: string
+        default: ''
+
+      snapshot-dir:
+        description: >-
+          Directory containing pre-deploy snapshots. sqlite: path INSIDE the
+          container on the data volume (default `<dirname of db-path>/pre-deploy-snapshots`).
+          postgres: path on the VPS HOST (default `<repo-dir>/pre-deploy-snapshots`).
+          Must be on persistent storage.
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  rollback:
+    name: Rollback VPS (${{ inputs.environment }}) → ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Env file render — identical to deploy-vps-shared except VERSION is the
+      # rollback tag rather than a deploy ref.
+      # -----------------------------------------------------------------------
+
+      - name: Load app secrets from Infisical (dotenv mode)
+        id: load-app-secrets
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.app-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.app-path }}
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
+
+      - name: Load extra shared folder 1 (dotenv mode)
+        id: extra-1
+        if: ${{ inputs.extra-shared-path-1 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-1 }}
+          recursive: 'true'
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-1.env
+
+      - name: Load extra shared folder 2 (dotenv mode)
+        id: extra-2
+        if: ${{ inputs.extra-shared-path-2 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-2 }}
+          recursive: 'true'
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-2.env
+
+      - name: Load extra shared folder 3 (dotenv mode)
+        id: extra-3
+        if: ${{ inputs.extra-shared-path-3 != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.extra-shared-path-3 }}
+          recursive: 'true'
+          include-imports: 'true'
+          export-as-env: dotenv
+          dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
+
+      - name: Merge extra shared folders into the env file
+        if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' }}
+        shell: bash
+        env:
+          APP_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          E1: ${{ steps.extra-1.outputs.dotenv-file-path }}
+          E2: ${{ steps.extra-2.outputs.dotenv-file-path }}
+          E3: ${{ steps.extra-3.outputs.dotenv-file-path }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          for f in "$E1" "$E2" "$E3"; do
+            [[ -n "$f" && -f "$f" ]] && cat "$f" >> "$tmp"
+          done
+          cat "$APP_FILE" >> "$tmp"
+          mv "$tmp" "$APP_FILE"
+          echo "Merged extra shared folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
+
+      - name: Append VERSION to dotenv file
+        shell: bash
+        env:
+          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
+          echo "Appended VERSION=${VERSION} to dotenv file"
+
+      - name: Encode rendered env file for transfer
+        id: encode-env
+        shell: bash
+        env:
+          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+        run: |
+          set -euo pipefail
+          b64="$(base64 -w0 "$DOTENV_FILE")"
+          echo "::add-mask::$b64"
+          echo "b64=$b64" >> "$GITHUB_OUTPUT"
+
+      - name: Load infra secrets from Infisical (env mode)
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.infra-path }}
+          recursive: 'true'
+          include-imports: 'true'
+          export-as-env: 'true'
+
+      - name: Connect to Tailscale
+        uses: aretecp/github-actions/actions/tailscale-connect@v1
+        with:
+          authkey: ${{ env.TAILSCALE_AUTHKEY }}
+
+      - name: Check out version tag on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          VERSION: ${{ inputs.version }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,VERSION
+          script: |
+            set -euo pipefail
+
+            if [[ ! -d "$REPO_DIR/.git" ]]; then
+              echo "::error::repo-dir '$REPO_DIR' does not contain a git checkout." >&2
+              echo "Rollback requires an existing checkout on the VPS." >&2
+              exit 1
+            fi
+
+            cd "$REPO_DIR"
+            echo "Fetching tags and checking out $VERSION..."
+            git fetch --prune --tags --force origin
+            git checkout --force "$VERSION"
+            echo "Checked out: $(git log -1 --oneline)"
+
+      - name: Write env file to VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          ENV_FILE_B64: ${{ steps.encode-env.outputs.b64 }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,ENV_FILE_NAME,ENV_FILE_B64
+          script: |
+            set -euo pipefail
+            TARGET="$REPO_DIR/$ENV_FILE_NAME"
+            printf '%s' "$ENV_FILE_B64" | base64 -d > "$TARGET"
+            chmod 600 "$TARGET"
+            if [[ ! -s "$TARGET" ]]; then
+              echo "::error::Env file is empty at $TARGET after decode." >&2
+              exit 1
+            fi
+            echo "Wrote $TARGET ($(grep -c '=' "$TARGET") vars)."
+
+      # -----------------------------------------------------------------------
+      # DB restore — opt-in, DESTRUCTIVE. Guarded by confirm==RESTORE-DB.
+      # Runs AFTER checkout + env write, BEFORE compose up so the container
+      # starts on the restored DB.
+      # -----------------------------------------------------------------------
+
+      - name: Validate DB restore confirmation
+        if: ${{ inputs.restore-db-snapshot }}
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          DB_TYPE: ${{ inputs.db-type }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRM" != "RESTORE-DB" ]]; then
+            echo "::error::restore-db-snapshot=true but confirm='$CONFIRM' (expected 'RESTORE-DB')." >&2
+            echo "::error::Pass confirm: RESTORE-DB in the workflow_call inputs to acknowledge this is destructive." >&2
+            exit 1
+          fi
+          if [[ "$DB_TYPE" == "none" ]]; then
+            echo "::error::restore-db-snapshot=true but db-type=none. Set db-type to sqlite or postgres." >&2
+            exit 1
+          fi
+          if [[ "$DB_TYPE" != "sqlite" && "$DB_TYPE" != "postgres" ]]; then
+            echo "::error::Unknown db-type '$DB_TYPE' (expected sqlite|postgres)." >&2
+            exit 1
+          fi
+          echo "Confirmation accepted. Proceeding with $DB_TYPE DB restore."
+
+      - name: Restore DB snapshot (sqlite)
+        if: ${{ inputs.restore-db-snapshot && inputs.db-type == 'sqlite' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DB_CONTAINER: ${{ inputs.db-container }}
+          DB_PATH: ${{ inputs.db-path }}
+          SNAPSHOT_DIR: ${{ inputs.snapshot-dir }}
+          REPO_DIR: ${{ inputs.repo-dir }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: DB_CONTAINER,DB_PATH,SNAPSHOT_DIR,REPO_DIR
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+
+            if [[ -z "$DB_CONTAINER" ]]; then
+              echo "::error::db-type=sqlite requires db-container." >&2
+              exit 1
+            fi
+            if [[ -z "$DB_PATH" ]]; then
+              echo "::error::db-type=sqlite requires db-path." >&2
+              exit 1
+            fi
+
+            DB_BASENAME="$(basename "$DB_PATH")"
+            DB_DIR="$(dirname "$DB_PATH")"
+
+            echo "=== SQLite DB rollback: container=$DB_CONTAINER db=$DB_PATH ==="
+
+            # 1. Stop the app container so we can swap the DB safely.
+            #    A mid-write swap is how DBs become "malformed".
+            echo "Stopping $DB_CONTAINER..."
+            docker stop "$DB_CONTAINER" 2>/dev/null || echo "  ($DB_CONTAINER not running — proceeding)"
+
+            # 2. Find the named Docker volume mounted at DB_DIR in the (now-stopped)
+            #    container. docker inspect works on stopped containers.
+            #    We use jq to filter mounts by Destination to avoid Go-template
+            #    injection of shell variables into the format string.
+            VOLUME_NAME=$(docker inspect "$DB_CONTAINER" \
+              | jq -r --arg dst "$DB_DIR" \
+                  '.[0].Mounts[] | select(.Type == "volume" and .Destination == $dst) | .Name')
+
+            if [[ -z "$VOLUME_NAME" ]]; then
+              echo "::error::Could not find a named Docker volume mounted at $DB_DIR in container $DB_CONTAINER." >&2
+              echo "::error::Ensure db-path points to a directory backed by a named volume." >&2
+              docker start "$DB_CONTAINER" || true
+              exit 1
+            fi
+            echo "Data volume: $VOLUME_NAME"
+
+            # Snapshot dir lives inside the container on the data volume.
+            # When mounted at /data in alpine, the volume root maps to /data,
+            # so SNAP_DIR relative to the volume root is the subpath under DB_DIR.
+            SNAP_DIR_IN_VOL="${SNAPSHOT_DIR:-pre-deploy-snapshots}"
+            # If snapshot-dir was specified as an absolute path inside the container,
+            # make it relative to DB_DIR so it maps correctly under /data.
+            if [[ "$SNAP_DIR_IN_VOL" == /* ]]; then
+              SNAP_DIR_IN_VOL="${SNAP_DIR_IN_VOL#$DB_DIR/}"
+            fi
+
+            # 3. Find the most-recent pre-deploy snapshot. FAIL if none found —
+            #    do not silently roll back code without the DB restore the caller
+            #    explicitly requested.
+            SNAP=$(docker run --rm -v "${VOLUME_NAME}:/data" alpine \
+              sh -c "ls -1t /data/${SNAP_DIR_IN_VOL}/pre-deploy-*.db 2>/dev/null | head -1" || true)
+
+            if [[ -z "$SNAP" ]]; then
+              echo "::error::No pre-deploy snapshot found in volume ${VOLUME_NAME} at /${SNAP_DIR_IN_VOL}/" >&2
+              echo "Cannot perform DB restore. Starting $DB_CONTAINER on the current DB..." >&2
+              docker start "$DB_CONTAINER" || true
+              exit 1
+            fi
+            echo "Using snapshot: $SNAP"
+
+            # 4. Move current DB aside (.before-rollback-<ts>) for forensics +
+            #    manual re-restore path. Clear WAL/SHM sidecars so SQLite doesn't
+            #    replay them against the restored file.
+            TS=$(date -u +%Y%m%dT%H%M%SZ)
+            docker run --rm -v "${VOLUME_NAME}:/data" alpine sh -c "
+              set -e
+              if [ -f /data/${DB_BASENAME} ]; then
+                mv /data/${DB_BASENAME} /data/${DB_BASENAME}.before-rollback-${TS}
+                echo '  moved live DB aside: /data/${DB_BASENAME}.before-rollback-${TS}'
+              fi
+              rm -f /data/${DB_BASENAME}-wal /data/${DB_BASENAME}-shm
+              echo '  cleared WAL/SHM'
+              cp ${SNAP} /data/${DB_BASENAME}
+              chown 1000:1000 /data/${DB_BASENAME}
+              echo '  swap complete'
+              ls -la /data/${DB_BASENAME}
+            "
+
+            # 5. Integrity-check the restored DB before booting the app against it.
+            docker run --rm -v "${VOLUME_NAME}:/data" python:3.12-slim python -c "
+            import sqlite3
+            integ = sqlite3.connect('/data/${DB_BASENAME}').execute('PRAGMA integrity_check').fetchone()[0]
+            print('restored_integrity:', integ)
+            assert integ == 'ok', f'Restored DB integrity check failed: {integ}'
+            print('Integrity check passed.')
+            "
+
+            echo "=== SQLite DB restore complete. Pre-rollback DB saved as ${DB_BASENAME}.before-rollback-${TS} ==="
+
+      - name: Restore DB snapshot (postgres)
+        if: ${{ inputs.restore-db-snapshot && inputs.db-type == 'postgres' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DB_CONTAINER: ${{ inputs.db-container }}
+          DB_NAME: ${{ inputs.db-name }}
+          DB_USER: ${{ inputs.db-user }}
+          SNAPSHOT_DIR: ${{ inputs.snapshot-dir }}
+          REPO_DIR: ${{ inputs.repo-dir }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: DB_CONTAINER,DB_NAME,DB_USER,SNAPSHOT_DIR,REPO_DIR
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+
+            if [[ -z "$DB_CONTAINER" || -z "$DB_NAME" || -z "$DB_USER" ]]; then
+              echo "::error::db-type=postgres requires db-container, db-name, and db-user." >&2
+              exit 1
+            fi
+
+            SNAP_DIR="${SNAPSHOT_DIR:-$REPO_DIR/pre-deploy-snapshots}"
+
+            echo "=== Postgres DB rollback: container=$DB_CONTAINER db=$DB_NAME ==="
+
+            # Find the most-recent pre-deploy dump. FAIL if none found.
+            SNAP=$(ls -1t "${SNAP_DIR}"/pre-deploy-*.sql.gz 2>/dev/null | head -1 || true)
+
+            if [[ -z "$SNAP" ]]; then
+              echo "::error::No pre-deploy pg_dump found in ${SNAP_DIR}/" >&2
+              echo "Cannot perform DB restore." >&2
+              exit 1
+            fi
+            echo "Using snapshot: $SNAP ($(du -h "$SNAP" | cut -f1))"
+
+            # Verify Postgres is reachable.
+            docker exec "$DB_CONTAINER" pg_isready -U "$DB_USER" -d "$DB_NAME"
+
+            # Drop and restore. pg_restore runs inside the container; the dump
+            # file is piped in via docker exec stdin. set -o pipefail means a
+            # failed gunzip or pg_restore fails the step.
+            echo "Dropping and restoring $DB_NAME from $SNAP..."
+            gunzip -c "$SNAP" | docker exec -i "$DB_CONTAINER" \
+              pg_restore -U "$DB_USER" --clean --if-exists --no-privileges --no-owner -d "$DB_NAME"
+
+            echo "=== Postgres DB restore complete ==="
+
+      # -----------------------------------------------------------------------
+      # Compose up + healthcheck — identical to deploy-vps-shared.
+      # -----------------------------------------------------------------------
+
+      - name: Docker Compose up on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          COMPOSE_BUILD: ${{ inputs.compose-build }}
+          COMPOSE_FORCE_RECREATE: ${{ inputs.compose-force-recreate }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE
+          script: |
+            set -euo pipefail
+            cd "$REPO_DIR"
+
+            UP_FLAGS=(-d)
+            [[ "$COMPOSE_BUILD" == "true" ]] && UP_FLAGS+=(--build)
+            [[ "$COMPOSE_FORCE_RECREATE" == "true" ]] && UP_FLAGS+=(--force-recreate)
+
+            echo "Starting services: compose=$COMPOSE_FILE env=$ENV_FILE_NAME flags=${UP_FLAGS[*]}"
+            if [[ "$COMPOSE_BUILD" != "true" ]]; then
+              docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" pull
+            fi
+            docker compose --env-file "$ENV_FILE_NAME" -f "$COMPOSE_FILE" up "${UP_FLAGS[@]}"
+
+      - name: Wait for containers to become healthy
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          HEALTHCHECK_CONTAINERS: ${{ inputs.healthcheck-containers }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,HEALTHCHECK_CONTAINERS
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            # Pinned to v2 — same major as deploy-vps-shared. Do NOT use
+            # github.ref_name here (resolves to the caller's ref in a reusable
+            # workflow, not this repo's tag).
+            curl -fsSL \
+              "https://raw.githubusercontent.com/aretecp/github-actions/v2/scripts/wait-for-healthy.sh" \
+              | COMPOSE_FILE="$REPO_DIR/$COMPOSE_FILE" \
+                ENV_FILE="$REPO_DIR/$ENV_FILE_NAME" \
+                bash -s -- $HEALTHCHECK_CONTAINERS

@@ -1,0 +1,492 @@
+name: Copy Prod DB to Dev (shared)
+
+# Reusable workflow to copy the PROD database to DEV on the same VPS.
+# PROD is strictly READ-ONLY: only WAL-safe .backup() (sqlite) or pg_dump
+# (postgres) are performed against it — no writes, no container stops.
+# The WRITE side is DEV only, and it is guarded by a typed confirmation.
+#
+# `environment: production` is set so the GitHub OIDC subject claim matches
+# the Infisical identity's trust policy (Tailscale creds come from the
+# shared project). This does NOT mean the write target is prod — it is dev.
+# See the confirm input below.
+#
+# Behavior (sqlite):
+#   1. Load infra/deploy folder (tailscale creds only — no app secrets, no .env).
+#   2. Connect to Tailscale.
+#   3. WAL-safe `.backup()` of prod DB → integrity-check.
+#   4. Back up dev's current DB aside (move-aside safety net — not present in
+#      per-repo workflows today; enforced centrally here).
+#   5. Stop dev app container.
+#   6. Copy prod snapshot into dev DB path.
+#   7. Start dev app container.
+#   8. Cleanup temp snapshot.
+#   9. Healthcheck dev containers.
+#
+# Behavior (postgres):
+#   1-2. Same load + Tailscale.
+#   3. pg_dump -Fc of prod DB (read-only; never writes to prod).
+#   4. pg_dump of dev DB aside (safety net).
+#   5. Drop + restore dev DB from prod dump.
+#   6. Cleanup.
+#
+# REQUIRED CALLER PERMISSIONS
+# ---------------------------
+#   permissions:
+#     id-token: write
+#     contents: read
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: >-
+          GitHub environment name — required for OIDC subject claim matching
+          the Infisical identity trust policy. NOTE: this is NOT the target
+          environment for the DB write; the write target is always DEV.
+        required: true
+        type: string
+
+      confirm:
+        description: >-
+          Typed confirmation that the dev DB will be overwritten. MUST equal
+          the literal string `CLOBBER-DEV` or the job fails before any DB
+          operation. No default — must be explicit.
+        required: true
+        type: string
+
+      infisical-identity-id:
+        description: >-
+          Infisical OIDC machine identity UUID. Safe to store as a non-secret
+          org variable (e.g. `vars.INFISICAL_OIDC_IDENTITY_ID`).
+        required: true
+        type: string
+
+      shared-project-slug:
+        description: >-
+          Infisical project slug holding the infra/Tailscale credentials
+          (e.g. `arete-shared`). Only the infra folder is loaded — no app
+          secrets, no .env render.
+        required: true
+        type: string
+
+      env-slug:
+        description: >-
+          Infisical environment slug applied to the infra folder load
+          (e.g. `prod`).
+        required: true
+        type: string
+
+      infra-path:
+        description: >-
+          Infisical folder path for Tailscale + VPS credentials in the shared
+          project. Defaults to `/tailscale`.
+        required: false
+        type: string
+        default: /tailscale
+
+      vps-user:
+        description: SSH user on the VPS (e.g. `ubuntu`, `deploy`).
+        required: true
+        type: string
+
+      repo-dir:
+        description: >-
+          Absolute path to the app checkout directory on the VPS
+          (e.g. `/home/sglyon/bd-pulse`). Used as the base for paths below.
+        required: true
+        type: string
+
+      db-type:
+        description: >-
+          `sqlite` or `postgres`. Determines the copy mechanism.
+        required: true
+        type: string
+
+      # --- SQLite inputs -----------------------------------------------------
+
+      prod-db-container:
+        description: >-
+          SQLite/Postgres: container that holds (sqlite) or serves (postgres)
+          the PROD database. READ-ONLY access only.
+        required: false
+        type: string
+        default: ''
+
+      dev-db-container:
+        description: >-
+          SQLite/Postgres: container that holds (sqlite) or serves (postgres)
+          the DEV database. This is the WRITE target.
+        required: false
+        type: string
+        default: ''
+
+      prod-db-path:
+        description: >-
+          SQLite only: absolute path to the prod `.db` file INSIDE
+          `prod-db-container` (e.g. `/app/data/bd_tracker.db`).
+        required: false
+        type: string
+        default: ''
+
+      dev-db-path:
+        description: >-
+          SQLite only: absolute path to the dev `.db` file INSIDE
+          `dev-db-container` (e.g. `/app/data/bd_tracker_dev.db`).
+        required: false
+        type: string
+        default: ''
+
+      # --- Postgres inputs ---------------------------------------------------
+
+      db-name:
+        description: 'Postgres only: database name (same for prod and dev — different containers).'
+        required: false
+        type: string
+        default: ''
+
+      db-user:
+        description: 'Postgres only: database superuser.'
+        required: false
+        type: string
+        default: ''
+
+      prod-db-name:
+        description: >-
+          Postgres only: prod database name if it differs from `db-name`.
+          Defaults to `db-name` when empty.
+        required: false
+        type: string
+        default: ''
+
+      dev-db-name:
+        description: >-
+          Postgres only: dev database name if it differs from `db-name`.
+          Defaults to `db-name` when empty.
+        required: false
+        type: string
+        default: ''
+
+      # --- Dev app compose (stop/start around the copy) ---------------------
+
+      dev-compose-file:
+        description: >-
+          Docker Compose file for the dev stack (e.g. `docker-compose.dev.yml`).
+          Relative to `repo-dir`. Used to stop/start the dev app container
+          around the copy.
+        required: true
+        type: string
+
+      dev-app-container:
+        description: >-
+          Dev app container name to stop before the copy and start after.
+          For sqlite only (postgres stays running). When empty the dev
+          compose-file `down`/`up` is skipped — use when the dev DB container
+          is separate from the app container.
+        required: false
+        type: string
+        default: ''
+
+      # --- Healthcheck -------------------------------------------------------
+
+      dev-healthcheck-containers:
+        description: >-
+          Space-separated list of container names to health-check after the
+          copy completes. All must reach `healthy` status.
+        required: false
+        type: string
+        default: ''
+
+      # --- Safety net --------------------------------------------------------
+
+      dev-backup-dir:
+        description: >-
+          Directory on the VPS HOST to save the dev DB backup before clobbering.
+          sqlite: save as `<dev-backup-dir>/dev-before-copy-<ts>.db`.
+          postgres: save as `<dev-backup-dir>/dev-before-copy-<ts>.sql.gz`.
+          Defaults to `<repo-dir>/dev-db-backups`.
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  copy-db:
+    name: Copy prod DB → dev (${{ inputs.db-type }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Validate confirm input
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          DB_TYPE: ${{ inputs.db-type }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRM" != "CLOBBER-DEV" ]]; then
+            echo "::error::confirm='$CONFIRM' — expected 'CLOBBER-DEV'." >&2
+            echo "::error::Pass confirm: CLOBBER-DEV to acknowledge that the dev DB will be overwritten." >&2
+            echo "::error::NOTE: environment: production is for OIDC claims. The write target is DEV." >&2
+            exit 1
+          fi
+          if [[ "$DB_TYPE" != "sqlite" && "$DB_TYPE" != "postgres" ]]; then
+            echo "::error::Unknown db-type '$DB_TYPE' (expected sqlite|postgres)." >&2
+            exit 1
+          fi
+          echo "Confirmation accepted. Proceeding with $DB_TYPE prod→dev copy."
+
+      # Load Tailscale + VPS credentials only. No app secrets, no .env render.
+      - name: Load infra secrets from Infisical (env mode)
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+        with:
+          method: oidc
+          identity-id: ${{ inputs.infisical-identity-id }}
+          project-slug: ${{ inputs.shared-project-slug }}
+          environment: ${{ inputs.env-slug }}
+          path: ${{ inputs.infra-path }}
+          recursive: 'true'
+          include-imports: 'true'
+          export-as-env: 'true'
+
+      - name: Connect to Tailscale
+        uses: aretecp/github-actions/actions/tailscale-connect@v1
+        with:
+          authkey: ${{ env.TAILSCALE_AUTHKEY }}
+
+      # -----------------------------------------------------------------------
+      # SQLite: WAL-safe read from prod → backup dev → stop dev → copy → start
+      # -----------------------------------------------------------------------
+
+      - name: Copy prod DB to dev (sqlite)
+        if: ${{ inputs.db-type == 'sqlite' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          PROD_DB_CONTAINER: ${{ inputs.prod-db-container }}
+          DEV_DB_CONTAINER: ${{ inputs.dev-db-container }}
+          PROD_DB_PATH: ${{ inputs.prod-db-path }}
+          DEV_DB_PATH: ${{ inputs.dev-db-path }}
+          DEV_COMPOSE_FILE: ${{ inputs.dev-compose-file }}
+          DEV_APP_CONTAINER: ${{ inputs.dev-app-container }}
+          DEV_BACKUP_DIR: ${{ inputs.dev-backup-dir }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,PROD_DB_CONTAINER,DEV_DB_CONTAINER,PROD_DB_PATH,DEV_DB_PATH,DEV_COMPOSE_FILE,DEV_APP_CONTAINER,DEV_BACKUP_DIR
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+
+            if [[ -z "$PROD_DB_CONTAINER" || -z "$DEV_DB_CONTAINER" || -z "$PROD_DB_PATH" || -z "$DEV_DB_PATH" ]]; then
+              echo "::error::db-type=sqlite requires prod-db-container, dev-db-container, prod-db-path, dev-db-path." >&2
+              exit 1
+            fi
+
+            PROD_DB_BASENAME="$(basename "$PROD_DB_PATH")"
+            DEV_DB_BASENAME="$(basename "$DEV_DB_PATH")"
+            BACKUP_DIR="${DEV_BACKUP_DIR:-$REPO_DIR/dev-db-backups}"
+            TS=$(date -u +%Y%m%dT%H%M%SZ)
+            HOST_SNAPSHOT="/tmp/prod-snapshot-${TS}.db"
+
+            echo "=== SQLite prod→dev copy: prod=$PROD_DB_CONTAINER:$PROD_DB_PATH → dev=$DEV_DB_CONTAINER:$DEV_DB_PATH ==="
+
+            # --- READ PROD (read-only — no writes to prod container) ---
+
+            # Step 1: WAL-safe backup from prod container to a temp file inside
+            # the prod container, then docker cp out to the host.
+            echo "Step 1: WAL-safe backup of prod DB..."
+            docker exec "$PROD_DB_CONTAINER" python -c "
+            import sqlite3, os
+            src = sqlite3.connect(os.environ['DB_PATH'])
+            src.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            dst = sqlite3.connect('/tmp/prod_snapshot_copy.db')
+            src.backup(dst)
+            dst.close(); src.close()
+            print('WAL-safe backup complete')
+            " DB_PATH="$PROD_DB_PATH"
+
+            # Step 2: Integrity-check the snapshot inside the prod container.
+            echo "Step 2: Integrity-check prod snapshot..."
+            docker exec "$PROD_DB_CONTAINER" python -c "
+            import sqlite3
+            r = sqlite3.connect('/tmp/prod_snapshot_copy.db').execute('PRAGMA integrity_check').fetchone()[0]
+            print('prod_snapshot_integrity:', r)
+            assert r == 'ok', f'Prod snapshot integrity failed: {r}'
+            "
+
+            # Step 3: Copy snapshot from prod container to VPS host.
+            echo "Step 3: Copying prod snapshot to host..."
+            docker cp "${PROD_DB_CONTAINER}:/tmp/prod_snapshot_copy.db" "$HOST_SNAPSHOT"
+
+            # Step 4: Cleanup the temp file inside prod container (read-only — no
+            # data change; this is the only write, it's in /tmp, not the DB).
+            docker exec "$PROD_DB_CONTAINER" rm -f /tmp/prod_snapshot_copy.db
+
+            # --- BACKUP DEV (safety net — missing from all per-repo workflows today) ---
+
+            # Step 5: Back up dev's current DB to the host before clobbering.
+            echo "Step 5: Backing up dev DB before clobber..."
+            mkdir -p "$BACKUP_DIR"
+            DEV_BACKUP="${BACKUP_DIR}/dev-before-copy-${TS}.db"
+            docker cp "${DEV_DB_CONTAINER}:${DEV_DB_PATH}" "$DEV_BACKUP" 2>/dev/null \
+              || echo "  (dev DB not found at $DEV_DB_PATH — first copy or container not running, skipping backup)"
+            if [[ -f "$DEV_BACKUP" ]]; then
+              echo "  Dev DB backed up to: $DEV_BACKUP"
+            fi
+
+            # --- WRITE DEV ---
+
+            # Step 6: Stop the dev app container before copying in the new DB.
+            echo "Step 6: Stopping dev app container..."
+            if [[ -n "$DEV_APP_CONTAINER" ]]; then
+              docker stop "$DEV_APP_CONTAINER" 2>/dev/null || echo "  ($DEV_APP_CONTAINER not running — proceeding)"
+            else
+              cd "$REPO_DIR"
+              docker compose -f "$DEV_COMPOSE_FILE" stop
+            fi
+
+            # Step 7: Copy the prod snapshot into the dev container's DB path.
+            echo "Step 7: Copying prod snapshot into dev DB..."
+            docker cp "$HOST_SNAPSHOT" "${DEV_DB_CONTAINER}:${DEV_DB_PATH}"
+
+            # Step 8: Start dev app container.
+            echo "Step 8: Starting dev app container..."
+            if [[ -n "$DEV_APP_CONTAINER" ]]; then
+              docker start "$DEV_APP_CONTAINER"
+            else
+              cd "$REPO_DIR"
+              docker compose -f "$DEV_COMPOSE_FILE" start
+            fi
+
+            # Step 9: Cleanup host temp file.
+            echo "Step 9: Cleaning up host temp files..."
+            rm -f "$HOST_SNAPSHOT"
+
+            echo "=== SQLite prod→dev copy complete. Dev DB backup: ${DEV_BACKUP:-none} ==="
+
+      # -----------------------------------------------------------------------
+      # Postgres: pg_dump prod (read-only) → backup dev → drop+restore dev
+      # -----------------------------------------------------------------------
+
+      - name: Copy prod DB to dev (postgres)
+        if: ${{ inputs.db-type == 'postgres' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          PROD_DB_CONTAINER: ${{ inputs.prod-db-container }}
+          DEV_DB_CONTAINER: ${{ inputs.dev-db-container }}
+          DB_NAME: ${{ inputs.db-name }}
+          DB_USER: ${{ inputs.db-user }}
+          PROD_DB_NAME: ${{ inputs.prod-db-name }}
+          DEV_DB_NAME: ${{ inputs.dev-db-name }}
+          DEV_BACKUP_DIR: ${{ inputs.dev-backup-dir }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,PROD_DB_CONTAINER,DEV_DB_CONTAINER,DB_NAME,DB_USER,PROD_DB_NAME,DEV_DB_NAME,DEV_BACKUP_DIR
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+
+            if [[ -z "$PROD_DB_CONTAINER" || -z "$DEV_DB_CONTAINER" || -z "$DB_USER" ]]; then
+              echo "::error::db-type=postgres requires prod-db-container, dev-db-container, and db-user." >&2
+              exit 1
+            fi
+            if [[ -z "$DB_NAME" && ( -z "$PROD_DB_NAME" || -z "$DEV_DB_NAME" ) ]]; then
+              echo "::error::db-type=postgres requires db-name (or both prod-db-name and dev-db-name)." >&2
+              exit 1
+            fi
+
+            EFFECTIVE_PROD_DB="${PROD_DB_NAME:-$DB_NAME}"
+            EFFECTIVE_DEV_DB="${DEV_DB_NAME:-$DB_NAME}"
+            BACKUP_DIR="${DEV_BACKUP_DIR:-$REPO_DIR/dev-db-backups}"
+            TS=$(date -u +%Y%m%dT%H%M%SZ)
+            HOST_PROD_DUMP="/tmp/prod-dump-${TS}.sql.gz"
+            HOST_DEV_BACKUP="${BACKUP_DIR}/dev-before-copy-${TS}.sql.gz"
+
+            echo "=== Postgres prod→dev copy: prod=$PROD_DB_CONTAINER:$EFFECTIVE_PROD_DB → dev=$DEV_DB_CONTAINER:$EFFECTIVE_DEV_DB ==="
+
+            # --- READ PROD (read-only) ---
+
+            # Step 1: Verify prod Postgres is reachable.
+            echo "Step 1: Checking prod DB availability..."
+            docker exec "$PROD_DB_CONTAINER" pg_isready -U "$DB_USER" -d "$EFFECTIVE_PROD_DB"
+
+            # Step 2: pg_dump prod in custom format, stream to host. NEVER writes
+            # to the prod container — pg_dump is a read-only operation.
+            echo "Step 2: pg_dump of prod DB → $HOST_PROD_DUMP..."
+            docker exec "$PROD_DB_CONTAINER" \
+              pg_dump -U "$DB_USER" -Fc "$EFFECTIVE_PROD_DB" | gzip > "$HOST_PROD_DUMP"
+
+            if [[ ! -s "$HOST_PROD_DUMP" ]]; then
+              echo "::error::pg_dump produced an empty dump at $HOST_PROD_DUMP." >&2
+              exit 1
+            fi
+            echo "  Prod dump: $HOST_PROD_DUMP ($(du -h "$HOST_PROD_DUMP" | cut -f1))"
+
+            # --- BACKUP DEV (safety net) ---
+
+            # Step 3: pg_dump dev DB aside before clobbering.
+            echo "Step 3: Backing up dev DB before clobber..."
+            mkdir -p "$BACKUP_DIR"
+            if docker exec "$DEV_DB_CONTAINER" pg_isready -U "$DB_USER" -d "$EFFECTIVE_DEV_DB" 2>/dev/null; then
+              docker exec "$DEV_DB_CONTAINER" \
+                pg_dump -U "$DB_USER" -Fc "$EFFECTIVE_DEV_DB" | gzip > "$HOST_DEV_BACKUP" 2>/dev/null \
+                || echo "  (dev dump failed — dev DB may not exist yet, skipping backup)"
+              if [[ -s "$HOST_DEV_BACKUP" ]]; then
+                echo "  Dev DB backed up to: $HOST_DEV_BACKUP ($(du -h "$HOST_DEV_BACKUP" | cut -f1))"
+              fi
+            else
+              echo "  Dev Postgres not ready — skipping dev backup (first copy or container down)"
+            fi
+
+            # --- WRITE DEV ---
+
+            # Step 4: Drop and restore dev DB from prod dump.
+            # gunzip streams to pg_restore via stdin; pg_restore --clean --if-exists
+            # handles the drop without a separate DROP DATABASE (avoids "other users
+            # connected" failures that a standalone DROP can hit).
+            echo "Step 4: Restoring prod dump into dev DB..."
+            gunzip -c "$HOST_PROD_DUMP" | docker exec -i "$DEV_DB_CONTAINER" \
+              pg_restore -U "$DB_USER" --clean --if-exists --no-privileges --no-owner -d "$EFFECTIVE_DEV_DB"
+
+            echo "  Restore complete."
+
+            # Step 5: Cleanup host temp files.
+            echo "Step 5: Cleaning up..."
+            rm -f "$HOST_PROD_DUMP"
+
+            echo "=== Postgres prod→dev copy complete. Dev backup: $HOST_DEV_BACKUP ==="
+
+      # -----------------------------------------------------------------------
+      # Healthcheck dev containers (optional — skip when no containers listed).
+      # -----------------------------------------------------------------------
+
+      - name: Wait for dev containers to become healthy
+        if: ${{ inputs.dev-healthcheck-containers != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REPO_DIR: ${{ inputs.repo-dir }}
+          DEV_COMPOSE_FILE: ${{ inputs.dev-compose-file }}
+          DEV_HEALTHCHECK_CONTAINERS: ${{ inputs.dev-healthcheck-containers }}
+        with:
+          host: ${{ env.VPS_TAILSCALE_IP }}
+          username: ${{ inputs.vps-user }}
+          key: ${{ env.VPS_SSH_KEY }}
+          envs: REPO_DIR,DEV_COMPOSE_FILE,DEV_HEALTHCHECK_CONTAINERS
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            # For the dev copy there is no .env to pass — the dev container
+            # manages its own env file. We use the compose file for context only.
+            # wait-for-healthy.sh only needs container names to inspect.
+            # Pin to v2 — same major as the other shared workflows.
+            curl -fsSL \
+              "https://raw.githubusercontent.com/aretecp/github-actions/v2/scripts/wait-for-healthy.sh" \
+              | COMPOSE_FILE="$REPO_DIR/$DEV_COMPOSE_FILE" \
+                ENV_FILE="$REPO_DIR/.env.dev" \
+                bash -s -- $DEV_HEALTHCHECK_CONTAINERS
