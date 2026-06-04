@@ -12,7 +12,7 @@ name: Deploy to VPS (shared)
 #      TAILSCALE_AUTHKEY, VPS_TAILSCALE_IP, VPS_SSH_KEY. Never written to the
 #      app .env.
 #   3. Connect to the Tailscale tailnet via tailscale-connect@v1.
-#   4. SCP the rendered env file to the VPS (appleboy/scp-action).
+#   4. Write the rendered env file to the VPS over ssh (base64 via ssh-action).
 #   5. allow-clone gate: dev may clone; prod refuses clone (requires existing
 #      checkout on the VPS).
 #   6. docker compose --env-file <env-file-name> up -d --pull always
@@ -295,9 +295,8 @@ jobs:
           path: ${{ inputs.app-path }}
           include-imports: 'true'
           export-as-env: dotenv
-          # Render to a temp file whose basename IS the target env filename, so
-          # scp-action (which treats `target` as a directory and keeps the
-          # source basename) lands it at repo-dir/<env-file-name>.
+          # Render to a temp file on the runner; the "Encode" step base64s it and
+          # the "Write env file" step decodes it onto the VPS at the final name.
           dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
 
       # Optional additional shared folders rendered into the same .env. Each is
@@ -383,6 +382,20 @@ jobs:
           printf 'VERSION=%s\n' "$VERSION" >> "$DOTENV_FILE"
           echo "Appended VERSION=${VERSION} to dotenv file"
 
+      - name: Encode rendered env file for transfer
+        id: encode-env
+        shell: bash
+        env:
+          DOTENV_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
+        run: |
+          set -euo pipefail
+          # Single-line base64 so the whole .env rides through ssh-action's
+          # `envs:` as one variable — no scp (drone-scp breaks on the VPS login
+          # shell's `mise` stderr), no quoting issues. Masked since it is secrets.
+          b64="$(base64 -w0 "$DOTENV_FILE")"
+          echo "::add-mask::$b64"
+          echo "b64=$b64" >> "$GITHUB_OUTPUT"
+
       - name: Load infra secrets from Infisical (env mode)
         uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
@@ -403,8 +416,8 @@ jobs:
         with:
           authkey: ${{ env.TAILSCALE_AUTHKEY }}
 
-      # Checkout MUST run before the scp — scp-action's `target` is a directory
-      # that has to already exist on the VPS (dev first-clone creates it here).
+      # Checkout MUST run before the env-file write — the write targets
+      # repo-dir, which dev first-clone creates here.
       - name: Prepare repo checkout on VPS
         uses: appleboy/ssh-action@v1.2.0
         env:
@@ -440,49 +453,31 @@ jobs:
               git pull --ff-only origin "$REF"
             fi
 
-      - name: SCP rendered env file to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ env.VPS_TAILSCALE_IP }}
-          username: ${{ inputs.vps-user }}
-          key: ${{ env.VPS_SSH_KEY }}
-          # `target` is a DIRECTORY; scp-action keeps the source basename, which
-          # we set to env-file-name via dotenv-output-path above. File lands at
-          # repo-dir/<env-file-name>.
-          source: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
-          target: ${{ inputs.repo-dir }}/
-          strip_components: 999
-
-      # Guard the scp landing spot. `strip_components: 999` is the common idiom
-      # for flattening a single source file to its basename in `target`, but the
-      # action does not document the count-exceeds-depth edge case — so we assert
-      # the env file actually arrived at repo-dir/<env-file-name>, non-empty,
-      # rather than risk bringing up a container with a missing/empty .env.
-      - name: Verify env file landed on VPS
+      # Write the env file over ssh (not scp): drone-scp fails on this VPS
+      # because the login shell emits `mise` warnings to stderr. ssh-action
+      # tolerates that (the checkout step above uses it successfully). The
+      # base64 blob rides in via `envs:` and is decoded on the VPS.
+      - name: Write env file to VPS
         uses: appleboy/ssh-action@v1.2.0
         env:
           REPO_DIR: ${{ inputs.repo-dir }}
           ENV_FILE_NAME: ${{ inputs.env-file-name }}
+          ENV_FILE_B64: ${{ steps.encode-env.outputs.b64 }}
         with:
           host: ${{ env.VPS_TAILSCALE_IP }}
           username: ${{ inputs.vps-user }}
           key: ${{ env.VPS_SSH_KEY }}
-          envs: REPO_DIR,ENV_FILE_NAME
+          envs: REPO_DIR,ENV_FILE_NAME,ENV_FILE_B64
           script: |
             set -euo pipefail
             TARGET="$REPO_DIR/$ENV_FILE_NAME"
-            if [[ ! -f "$TARGET" ]]; then
-              echo "::error::Expected env file not found at $TARGET — scp likely flattened the path differently than expected (check scp-action strip_components)." >&2
-              echo "Contents of $REPO_DIR:" >&2
-              ls -la "$REPO_DIR" >&2 || true
-              exit 1
-            fi
-            if [[ ! -s "$TARGET" ]]; then
-              echo "::error::Env file $TARGET is empty." >&2
-              exit 1
-            fi
+            printf '%s' "$ENV_FILE_B64" | base64 -d > "$TARGET"
             chmod 600 "$TARGET"
-            echo "Verified $TARGET ($(wc -l < "$TARGET") vars)."
+            if [[ ! -s "$TARGET" ]]; then
+              echo "::error::Env file is empty at $TARGET after decode." >&2
+              exit 1
+            fi
+            echo "Wrote $TARGET ($(grep -c '=' "$TARGET") vars)."
 
       # First-class pre-deploy DB backup. Runs before compose recreates
       # containers so a corrupt/failed deploy is recoverable. No-op when
