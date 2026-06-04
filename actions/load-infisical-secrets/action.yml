@@ -155,8 +155,9 @@ runs:
         recursive: ${{ inputs.recursive }}
         include-imports: ${{ inputs.include-imports }}
         export-type: file
-        # Workspace-relative (see dotenv step) — upstream doubles absolute paths.
-        file-output-path: load-infisical-secrets.env
+        # Leading slash required — see the dotenv step's note on upstream's
+        # string-concat path handling.
+        file-output-path: /load-infisical-secrets.env
 
     - name: Convert .env to JSON output
       id: json
@@ -169,6 +170,11 @@ runs:
 
         if [[ ! -f "$SECRETS_FILE" ]]; then
           echo "::error::Expected secrets file not found at $SECRETS_FILE"
+          # Self-diagnose: upstream's path handling has bitten before. Show
+          # where it might have actually written so a failure is immediately
+          # debuggable without an instrumented re-run.
+          echo "--- workspace ($GITHUB_WORKSPACE):" >&2; ls -la "$GITHUB_WORKSPACE" 2>/dev/null || true
+          echo "--- parent:" >&2; ls -la "$(dirname "$GITHUB_WORKSPACE")" 2>/dev/null || true
           exit 1
         fi
 
@@ -224,11 +230,12 @@ runs:
         recursive: ${{ inputs.recursive }}
         include-imports: ${{ inputs.include-imports }}
         export-type: file
-        # Upstream resolves file-output-path RELATIVE to GITHUB_WORKSPACE and
-        # string-joins it — an absolute path gets doubled (workspace + path) and
-        # fails ENOENT. Pass a bare workspace-relative filename; the render step
-        # reads it back from $GITHUB_WORKSPACE.
-        file-output-path: load-infisical-secrets-dotenv.env
+        # Upstream builds the output path by STRING-CONCAT: GITHUB_WORKSPACE +
+        # file-output-path (no path.join). So the value must start with `/` to
+        # land at <workspace>/<file>; a bare name glues on with no separator
+        # (`<ws>bd-pulseload-...`) and an absolute path doubles. The render step
+        # reads it back as ${{ github.workspace }}/<same file>.
+        file-output-path: /load-infisical-secrets-dotenv.env
 
     - name: Render bare dotenv file
       id: dotenv
@@ -242,6 +249,11 @@ runs:
 
         if [[ ! -f "$SECRETS_FILE" ]]; then
           echo "::error::Expected secrets file not found at $SECRETS_FILE"
+          # Self-diagnose: upstream's path handling has bitten before. Show
+          # where it might have actually written so a failure is immediately
+          # debuggable without an instrumented re-run.
+          echo "--- workspace ($GITHUB_WORKSPACE):" >&2; ls -la "$GITHUB_WORKSPACE" 2>/dev/null || true
+          echo "--- parent:" >&2; ls -la "$(dirname "$GITHUB_WORKSPACE")" 2>/dev/null || true
           exit 1
         fi
 
