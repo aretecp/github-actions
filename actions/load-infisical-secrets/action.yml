@@ -155,14 +155,15 @@ runs:
         recursive: ${{ inputs.recursive }}
         include-imports: ${{ inputs.include-imports }}
         export-type: file
-        file-output-path: ${{ runner.temp }}/load-infisical-secrets.env
+        # Workspace-relative (see dotenv step) — upstream doubles absolute paths.
+        file-output-path: load-infisical-secrets.env
 
     - name: Convert .env to JSON output
       id: json
       if: ${{ inputs.export-as-env == 'false' }}
       shell: bash
       env:
-        SECRETS_FILE: ${{ runner.temp }}/load-infisical-secrets.env
+        SECRETS_FILE: ${{ github.workspace }}/load-infisical-secrets.env
       run: |
         set -euo pipefail
 
@@ -223,14 +224,18 @@ runs:
         recursive: ${{ inputs.recursive }}
         include-imports: ${{ inputs.include-imports }}
         export-type: file
-        file-output-path: ${{ runner.temp }}/load-infisical-secrets-dotenv.env
+        # Upstream resolves file-output-path RELATIVE to GITHUB_WORKSPACE and
+        # string-joins it — an absolute path gets doubled (workspace + path) and
+        # fails ENOENT. Pass a bare workspace-relative filename; the render step
+        # reads it back from $GITHUB_WORKSPACE.
+        file-output-path: load-infisical-secrets-dotenv.env
 
     - name: Render bare dotenv file
       id: dotenv
       if: ${{ inputs.export-as-env == 'dotenv' }}
       shell: bash
       env:
-        SECRETS_FILE: ${{ runner.temp }}/load-infisical-secrets-dotenv.env
+        SECRETS_FILE: ${{ github.workspace }}/load-infisical-secrets-dotenv.env
         DOTENV_OUTPUT_PATH: ${{ inputs.dotenv-output-path }}
       run: |
         set -euo pipefail
