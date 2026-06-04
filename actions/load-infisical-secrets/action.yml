@@ -291,8 +291,12 @@ runs:
             k="${BASH_REMATCH[1]}"
             v="${BASH_REMATCH[2]}"
 
-            # Strip surrounding double-quotes if present (upstream .env style)
-            if [[ ${#v} -ge 2 && "$v" == '"'*'"' ]]; then
+            # Strip ONE layer of surrounding quotes — SINGLE or double. Infisical
+            # exports values single-quoted ('value'); without stripping, the
+            # literal quotes get written into the .env and docker compose
+            # --env-file passes them verbatim into the container (so e.g.
+            # MICROSOFT_CLIENT_SECRET arrives as 'secret' and the app rejects it).
+            if [[ ${#v} -ge 2 && ( "$v" == '"'*'"' || "$v" == "'"*"'" ) ]]; then
               v="${v:1:${#v}-2}"
             fi
 
