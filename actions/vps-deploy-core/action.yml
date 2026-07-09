@@ -373,7 +373,14 @@ runs:
 
           cd "$REPO_DIR"
           echo "Fetching and checking out $REF..."
-          git fetch --prune --tags --force origin
+          # Explicit all-branches refspec so single-branch clones (fetch refspec
+          # pinned to one branch, e.g. a --single-branch clone) still pull
+          # feature-branch refs. Passing a refspec on the CLI overrides the
+          # remote's configured fetch refspec for this fetch, so `git checkout
+          # "$REF"` works for any branch — not just the clone's default —
+          # without mutating the clone config (aretecp/bd-pulse#2299). --tags
+          # still covers tag refs.
+          git fetch --prune --tags --force origin '+refs/heads/*:refs/remotes/origin/*'
           git checkout --force "$REF"
           # Fast-forward only when on a branch; tags/detached HEAD are already
           # at the right commit and a pull would be meaningless or fail.
