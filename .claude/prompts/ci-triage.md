@@ -30,13 +30,6 @@ DO:
 7. Add labels using: gh issue edit <number> --add-label <label>
    - Type: bug, enhancement, or documentation
    - Priority: P1-critical, P2-high, P3-medium, or P4-low
-   - **Auto-dev gate**: if Type is `bug` AND Points ≤ 2, ALSO add the `auto-dev`
-     label — this opts the issue into the autonomous fix workflow (Claude
-     implements it and opens a draft PR). Do NOT add `auto-dev` for
-     enhancements, docs, questions, or anything larger than 2 points; those stay
-     for a human via `/work-issue`. The label may not exist in every repo —
-     check `gh label list` first and skip silently if it's absent (only repos
-     with the auto-dev workflow installed will have it).
 8. Suggest a branch name (do NOT create it — `/work-issue` creates the branch off `base_branch` when work starts):
    - Format: {type}/{issue#}-{short-desc}
    - Types: feature, fix, chore, docs, refactor
