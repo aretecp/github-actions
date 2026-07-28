@@ -86,9 +86,22 @@ jobs:
     uses: aretecp/github-actions/.github/workflows/claude-issue-triage.yml@v2
 ```
 
-Only `beacon` keeps one input (`checkout-ref: develop` — it deliberately triages dev code while
-its default branch is `main`). Everything else is irreducible GHA structure: triggers must live in
-the caller, and a caller's `permissions` grant is the ceiling for the reusable job.
+Everything left is irreducible GHA structure: triggers must live in the caller, and a caller's
+`permissions` grant is the ceiling for the reusable job.
+
+**Decision (Dominick, 2026-07-28): triage analyzes the trunk branch, not develop.** PRs flow
+through develop, but the code Claude reads when triaging is trunk. Since the shared workflow
+defaults `checkout-ref` to the caller's default branch, that means **zero inputs in 6 of 7 repos**:
+
+| Repo | Default branch | Input needed |
+|---|---|---|
+| `areteos`, `beacon`, `bd-pulse`, `areteos-py`, `ari-website` | `main` | none |
+| `contact-intelligence` | `master` (no `main` exists — master *is* trunk) | none |
+| `arilearn-phx` | `develop` (but `main` exists) | `checkout-ref: main` |
+
+This reversed an earlier read of mine: I first shipped `checkout-ref: develop` everywhere on the
+assumption that "everything goes through develop" applied to the analysis ref too. It doesn't —
+that convention is about merge flow.
 
 ---
 
@@ -182,20 +195,30 @@ the OIDC-grant question in Phase 1.
       `ANTHROPIC_API_KEY`. *Confirmed present in `prod` by spike S3.*
 - [x] Grant the OIDC machine identity read on `arete-internal` `/github-actions`
       *Confirmed by spike S3.*
-- [ ] ⛔ **BLOCKED — R3 CONFIRMED (2026-07-28).** Probed both never-OIDC repos directly
-      (`contact-intelligence` run `30372414296`, `ari-website` run `30372418529`). Both failed at
-      the first step with `identity-id length: 0` — **the org variables are not visible to these
-      two repos**. The probe bailed before the Infisical call, so whether the OIDC identity trusts
-      them is still untested.
+- [x] **R3 diagnosed and fixed (2026-07-28).** Probed both never-OIDC repos directly
+      (`contact-intelligence` run `30372414296`, `ari-website` run `30372418529`). Both failed with
+      `identity-id length: 0`.
 
-      **Needs an org admin (not me — `gh api /orgs/aretecp/actions/variables/...` 403s):** add
-      `contact-intelligence` and `ari-website` to the selected-repositories list for both
-      `INFISICAL_OIDC_IDENTITY_ID` and `INFISICAL_INTERNAL_PROJECT_SLUG`. Then re-run the two
-      probes (branches `spike/oidc-probe` are still in place for exactly this) to confirm OIDC
-      trust before their shims land.
+      **Root cause — not org-level visibility.** Areté does not use org-level Actions variables at
+      all; every repo carries its own **repo-level** copies. `gh variable list` across the fleet
+      showed the real state: `contact-intelligence` had the three `INFISICAL_*_PROJECT_SLUG` vars
+      but was missing `INFISICAL_OIDC_IDENTITY_ID`; `ari-website` had none at all. That exactly
+      explains the asymmetry in the probe output (contact-intelligence resolved the slug but not
+      the identity).
 
-      Unaffected: `bd-pulse`, `arilearn-phx`, `areteos-py` already use
-      `vars.INFISICAL_OIDC_IDENTITY_ID` in existing workflows, so they are not blocked by this.
+      My first diagnosis — "add these repos to the org variable's selected-repositories list" —
+      was wrong, and the `admin:org` 403 masked it: I couldn't list org variables, so I assumed
+      that's where they lived. Corrected by Dominick.
+
+      **Fix applied**: copied `INFISICAL_OIDC_IDENTITY_ID` into `contact-intelligence`, and the
+      identity plus all three project-slug vars into `ari-website`, matching fleet convention. The
+      identity UUID is identical across all five working repos.
+
+      Unaffected: `bd-pulse`, `arilearn-phx`, `areteos-py` already carry the repo-level vars.
+
+      **Follow-up worth considering**: nothing enforces that a new repo gets these four variables,
+      and the failure mode is a workflow that silently resolves an empty identity. A bootstrap
+      script or a checklist entry in the machine-identity runbook would prevent the next repeat.
 
 - [ ] Original wording of this check:
       `contact-intelligence` and `ari-website` have never used
@@ -216,14 +239,29 @@ the OIDC-grant question in Phase 1.
 - [ ] Cut `v2.5.0`, move the `v2` tag
 - [ ] README: triage row says `v1` → change to `v2`
 
-### Phase 3 — canary (PRs open, awaiting human merge)
+### Phases 3–5 — all 7 shim PRs open against `develop` (awaiting human merge)
 
-- [x] `areteos` → target shim, `@v1` → `@v2`, drop `with:` entirely — **PR aretecp/areteos#1448**
-- [x] `beacon` → drop `with:` except `checkout-ref: develop` — **PR aretecp/beacon#128**
-- [ ] File a real test issue in each; confirm the Infisical load, the triage comment, and labels.
-      Blocked on the two PRs merging: `issues`-triggered workflows only run from the default
-      branch, so there is no way to exercise this from a feature branch.
-- [ ] Do not proceed to Phase 4 until both are green
+Canary sequencing was dropped on request: all seven went out together rather than 2-then-5.
+All target `develop` (Areté repos merge through develop first — the earlier PRs targeting `main`
+were closed).
+
+| Repo | PR | Before → after |
+|---|---|---|
+| `areteos` | aretecp/areteos#1449 | 31 → 13, off stale `@v1` |
+| `beacon` | aretecp/beacon#129 | 38 → 13 |
+| `bd-pulse` | aretecp/bd-pulse#2639 | 144 → 13 |
+| `arilearn-phx` | aretecp/arilearn-phx#1214 | 131 → 15 (only repo needing an input) |
+| `contact-intelligence` | aretecp/contact-intelligence#76 | 132 → 13, fixes broken checkout |
+| `areteos-py` | aretecp/areteos-py#846 | `@v1` 4-input → 13 |
+| `ari-website` | aretecp/ari-website#32 | net-new, 13 |
+
+Closed as superseded: areteos#1448, beacon#128 (wrong base), ari-website#31 (stale `@v1`, pointed
+at a nonexistent `/ari-website` Infisical folder).
+
+- [ ] ⚠️ **Still never exercised against a real issue.** The canary step was skipped when the PRs
+      were retargeted. `issues`-triggered workflows only run from the default branch, so this
+      cannot be tested until at least one shim merges. Merge one repo, file a test issue, confirm
+      the comment + labels + issue type, then merge the rest.
 
 ### Phase 4 — migrate the 3 inline copies
 
