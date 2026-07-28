@@ -191,15 +191,24 @@ the OIDC-grant question in Phase 1.
 - [ ] Update `docs/runbooks/infisical-machine-identity.md` — it documents only Universal Auth
       today; add the OIDC identity and the `/github-actions` CI folder convention
 
-### Phase 2 — slim the shared workflow
+### Phase 2 — slim the shared workflow ✅ PR #64 open (awaiting human merge)
 
-- [ ] Port the two arilearn-phx improvements into `.claude/prompts/ci-triage.md`, with graceful
+- [x] Port the two arilearn-phx improvements into `.claude/prompts/ci-triage.md`, with graceful
       degradation when priority labels / `github_issue_types` are absent
-- [ ] Apply the coalesced defaults, `checkout-ref` → `default_branch`, `environment` → `''`
-- [ ] Rewrite the header comment block: document that the OIDC path now needs **zero inputs**
-- [ ] `actionlint`
-- [ ] Cut `v2.5.0`, move the `v2` tag
-- [ ] README: triage row says `v1` → change to `v2`
+      — **improved on arilearn**: issue-type IDs are resolved at run time via a repo-scoped
+      GraphQL query (they're org-level; confirmed identical to arilearn's hardcoded IDs), so no
+      per-repo CLAUDE.md `github_issue_types` block is needed anywhere
+- [x] Apply the coalesced defaults, `checkout-ref` → `default_branch`, `environment` → `''`
+- [x] Rewrite the header comment block: document that the OIDC path now needs **zero inputs**
+      (includes a copy-pasteable 15-line shim)
+- [x] `actionlint` — clean; 2 pre-existing SC2086 infos remain on untouched lines
+- [x] README: triage row `v1` → `v2`, plus a "Zero-config consumer shim" section
+- [x] **Bonus bug found**: `shared-ref` defaulted to `v1`, so consumers pinned `@v2` ran v2 logic
+      against a frozen v1 prompt. Now `v2`, with a note that it must track the major.
+- [x] Added a fail-fast auth check — a missing org-var grant now says what to fix instead of dying
+      in an opaque Claude auth error
+- [ ] **BLOCKED ON MERGE**: `v2.5.0` + `v2` move happens automatically via `release.yml` on push
+      to `main` (conventional `feat:` → minor bump). Nothing to do by hand.
 
 ### Phase 3 — canary
 
@@ -232,11 +241,17 @@ One PR per repo, each deleting ~130 lines:
 
 ### Phase 6 — labels, docs, memory
 
-- [ ] Backfill the standard label set where missing: `P1-critical`, `P2-high`, `P3-medium`,
-      `P4-low` in `beacon`, `ari-website`, `areteos-py`
+- [x] Backfill the standard label set where missing: `P1-critical`, `P2-high`, `P3-medium`,
+      `P4-low` created in `beacon`, `ari-website`, `areteos-py` (2026-07-28)
       (`bug` / `enhancement` / `documentation` already exist everywhere by default)
-- [ ] `areteos-py`: decide whether `priority-high/medium/low` gets aliased or replaced — don't
-      leave two parallel priority schemes
+- [ ] **NEEDS A DECISION — `areteos-py` now has two parallel priority schemes.** Its native
+      `priority-high` / `priority-medium` / `priority-low` are heavily used: 100+, 100+, and 44
+      issues respectively (counts capped by the query limit, so the real totals are higher).
+      Remapping 244+ issues is not a safe unilateral call, and the mapping is ambiguous
+      (`priority-high` → `P1-critical` or `P2-high`?). Left untouched for now, so new issues get
+      `P1`–`P4` while historical ones keep `priority-*`. Options:
+      (a) leave both, accept the split at this date; (b) bulk-relabel history to `P1`–`P4`;
+      (c) drop `P1`–`P4` from this repo and teach the prompt the `priority-*` scheme.
 - [ ] Add a `## Project Config` block (with `base_branch`) to the 5 repos missing one, so the
       prompt stops improvising: `bd-pulse`, `contact-intelligence`, `beacon`, `areteos-py`,
       `ari-website`
