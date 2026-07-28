@@ -21,7 +21,10 @@ DO:
 1. Read the issue — understand what's being reported (bug, feature, question)
 2. Read CLAUDE.md to get Project Config values (skip if absent)
 3. Use Glob to find the likely files involved (just paths, don't read them)
-4. Classify: bug, enhancement, or documentation
+4. Classify the issue type. Prefer the most specific label that **exists in this repo** (step 7):
+   `bug`, `enhancement` (or `feature` where that's the repo's term), `documentation`, or `chore`.
+   Repos differ — `beacon` and `ari-website` only have the first three; most others also have
+   `chore` and `feature`.
 5. Estimate scope: small (1-2 files), medium (3-5 files), large (5+ files)
 6. Estimate difficulty points using Fibonacci scale based on scope and complexity:
    - **1** — trivial, single obvious change
@@ -35,17 +38,19 @@ DO:
    gh label list --limit 100 --json name -q '.[].name'
    ```
 8. Add labels using `gh issue edit <number>`, applying only labels present in that list:
-   - Type label: bug, enhancement, or documentation
+   - Type label: `bug`, `enhancement`, `feature`, `documentation`, or `chore`
    - Priority: P1-critical, P2-high, P3-medium, or P4-low
-   - **Be idempotent — strip any conflicting label before adding yours**, so a re-run or a human-pre-set label never leaves duplicates. Combine remove+add in one call:
+   - **Be idempotent — strip every conflicting label before adding yours**, so a re-run or a human-pre-set label never leaves duplicates. Combine remove+add in one call:
      - Priority (only ONE may remain): `gh issue edit <number> --remove-label P1-critical --remove-label P2-high --remove-label P3-medium --remove-label P4-low --add-label <your-priority>` (`--remove-label` is a no-op if the label is absent, so list all four every time)
-     - Type label (only ONE may remain): `gh issue edit <number> --remove-label bug --remove-label enhancement --remove-label documentation --add-label <your-type-label>`
+     - Type label (only ONE may remain): `gh issue edit <number> --remove-label bug --remove-label enhancement --remove-label feature --remove-label documentation --remove-label chore --add-label <your-type-label>`
+       The strip list must cover **every** type label in the fleet, not just the one you're adding — otherwise a re-run that reclassifies leaves two type labels behind. `--remove-label` is a no-op when the label is absent, so listing all five every time is safe in every repo.
+   - Do **not** strip `hotfix`, `security`, `released`, or area labels (`backend`, `frontend`, `infra`, …). Those are not types and are usually set deliberately by a human — leave them exactly as you found them.
    - **If a label you want doesn't exist here, skip it and keep going** — do not create it, do not fail. Note the omission in the report footer (e.g. "priority labels not defined in this repo") so the gap is visible.
 9. Set the GitHub **issue type** (distinct from the type *label*). Resolve the available type IDs at run time — they are defined org-wide, so no CLAUDE.md entry is needed:
    ```
    gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){issueTypes(first:20){nodes{id name isEnabled}}}}'
    ```
-   Match your classification to a returned type by name: bug→`Bug`, enhancement→`Feature`, documentation→`Task`. Then set it (idempotent — this sets, it does not append):
+   Match your classification to a returned type by name: bug→`Bug`, enhancement/feature→`Feature`, documentation/chore→`Task`. Then set it (idempotent — this sets, it does not append):
    ```
    ISSUE_ID=$(gh api repos/<owner>/<repo>/issues/<number> --jq .node_id)
    gh api graphql -f query='mutation($id:ID!,$t:ID!){updateIssue(input:{id:$id,issueTypeId:$t}){issue{number issueType{name}}}}' -F id=$ISSUE_ID -F t=<RESOLVED_TYPE_ID>
@@ -61,7 +66,7 @@ Your output is posted as a GitHub issue comment. Use emojis and clean formatting
 
 | | |
 |---|---|
-| **Type** | bug / enhancement / docs |
+| **Type** | bug / enhancement / feature / documentation / chore |
 | **Priority** | P1-P4 |
 | **Points** | 1 / 2 / 3 / 5 / 8 / 13 |
 | **Scope** | small / medium / large |
