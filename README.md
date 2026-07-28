@@ -19,10 +19,45 @@ More to come — Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as 
 |---|---|---|
 | [`release-shared.yml`](.github/workflows/release-shared.yml) | Squash-merge → conventional-commit promotion → semantic-release → optional deploy trigger | `v1` |
 | [`deploy-vps-shared.yml`](.github/workflows/deploy-vps-shared.yml) | Render Infisical folder → dotenv → write to VPS over ssh → docker compose up → healthcheck. Callers become ~15-line shims. | `v2` |
-| [`claude-issue-triage.yml`](.github/workflows/claude-issue-triage.yml) | Auto-triage of new issues / `@claude` comments via Claude Code. Bundled system prompt at `.claude/prompts/ci-triage.md`. | `v1` |
+| [`claude-issue-triage.yml`](.github/workflows/claude-issue-triage.yml) | Auto-triage of new issues / `@claude` comments via Claude Code. Bundled system prompt at `.claude/prompts/ci-triage.md`. Callers pass **no inputs at all** — see [zero-config shim](#zero-config-consumer-shim). | `v2` |
 | [`pr-to-main-hooks.yml`](.github/workflows/pr-to-main-hooks.yml) | On PRs targeting `main`: gather context → Claude summary → update PR body + Closes #N footers → Teams card. | `v1` |
 
 Reusable workflows are called via `jobs.<name>.uses: aretecp/github-actions/.github/workflows/<file>@v1` in the consumer repo. See the workflow file's header comments for inputs and prerequisites.
+
+### Zero-config consumer shim
+
+`claude-issue-triage.yml@v2` needs **no `with:` block**. It reads the caller's own
+`vars.INFISICAL_OIDC_IDENTITY_ID` / `vars.INFISICAL_INTERNAL_PROJECT_SLUG` (unlike secrets, org
+variables resolve against the caller), loads `ANTHROPIC_API_KEY` from the shared CI folder
+`arete-internal/prod/github-actions`, and checks out the consumer's own default branch:
+
+```yaml
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+# Reusable workflows can only USE permissions the caller grants.
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  triage:
+    uses: aretecp/github-actions/.github/workflows/claude-issue-triage.yml@v2
+```
+
+That is the entire file. Every `infisical-*` input, plus `checkout-ref`, `environment`, and
+`claude-model`, remain available as optional overrides — pass `checkout-ref` only if you want to
+triage against something other than your default branch.
+
+> The CI key in `/github-actions` is deliberately separate from each app's own
+> `ANTHROPIC_API_KEY`. Apps keep theirs for runtime use; CI has its own so spend is attributable
+> and revocation is isolated.
 
 ## Usage
 

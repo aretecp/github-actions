@@ -11,10 +11,20 @@ name: Claude Issue Triage (shared)
 #
 # Two authentication paths for ANTHROPIC_API_KEY (mutually exclusive):
 #
-#   1. OIDC (preferred — no stored credentials in consumer repos):
-#      Caller provides `infisical-identity-id`, `infisical-project-slug`,
-#      `infisical-env`, `infisical-path`. The workflow loads ANTHROPIC_API_KEY
-#      from Infisical via short-lived GitHub OIDC token at run time.
+#   1. OIDC (preferred — ZERO caller inputs):
+#      The workflow reads `vars.INFISICAL_OIDC_IDENTITY_ID` and
+#      `vars.INFISICAL_INTERNAL_PROJECT_SLUG` from the CALLER's own org/repo
+#      variables (unlike secrets, vars resolve against the caller — verified
+#      2026-07-28, beacon run 30369406219), then loads ANTHROPIC_API_KEY from
+#      `arete-internal/prod/github-actions` via a short-lived GitHub OIDC
+#      token at run time.
+#
+#      That folder is the shared CI key location — deliberately NOT any app's
+#      folder. Apps keep their own ANTHROPIC_API_KEY for app-runtime use; CI
+#      gets its own key so spend is attributable and revocation is isolated.
+#
+#      Every `infisical-*` input below is an optional OVERRIDE. A consumer
+#      that wants the defaults passes no `with:` block at all.
 #
 #   2. Forwarded secret (legacy — still works for backward compat):
 #      Caller forwards ANTHROPIC_API_KEY via `secrets:` block. Used when
@@ -34,49 +44,84 @@ name: Claude Issue Triage (shared)
 #     contents: read
 #     issues: write
 #     id-token: write   # only required when using the OIDC auth path
+#
+# MINIMAL CONSUMER SHIM (the whole thing)
+# ---------------------------------------
+#   name: Claude Issue Triage
+#   on:
+#     issues:
+#       types: [opened]
+#     issue_comment:
+#       types: [created]
+#   permissions:
+#     contents: read
+#     issues: write
+#     id-token: write
+#   jobs:
+#     triage:
+#       uses: aretecp/github-actions/.github/workflows/claude-issue-triage.yml@v2
 
 on:
   workflow_call:
     inputs:
       environment:
-        description: 'Job environment scope. Required for env-level secret access in private repos on GitHub Free.'
+        description: >-
+          Job environment scope. Only needed for env-level secret access on the
+          legacy forwarded-secret path. Defaults to none: the OIDC path needs no
+          env-scoped secrets, and defaulting to `production` would run triage
+          inside a deployment environment — where any required reviewer would
+          silently block it pending approval.
         required: false
         type: string
-        default: production
+        default: ''
       checkout-ref:
-        description: 'Ref to check out from the consumer repo for Claude to analyze.'
+        description: >-
+          Ref to check out from the consumer repo for Claude to analyze.
+          Defaults to the consumer's own default branch, so repos on develop or
+          master work without configuration.
         required: false
         type: string
-        default: main
+        default: ''
       shared-ref:
-        description: 'Ref of aretecp/github-actions to pull the system prompt from. Pin to v1 or a specific SHA for reproducibility.'
+        description: >-
+          Ref of aretecp/github-actions to pull the system prompt from.
+          MUST track this workflow's own major tag — it defaulted to `v1` while
+          consumers called `@v2`, so they ran v2 logic against a frozen v1
+          prompt. Bump this default in lockstep with every major release.
+          (There is no expression context for a reusable workflow's own ref:
+          `job_workflow_sha` is an OIDC claim, not a `github` context property.)
         required: false
         type: string
-        default: v1
+        default: v2
       claude-model:
         description: 'Claude model alias.'
         required: false
         type: string
         default: claude-sonnet-4-6
 
-      # --- OIDC path (preferred) ---
+      # --- OIDC path (preferred) — all four are optional OVERRIDES ---
+      # Leave every one unset and the workflow resolves:
+      #   identity-id  → vars.INFISICAL_OIDC_IDENTITY_ID     (caller's org var)
+      #   project-slug → vars.INFISICAL_INTERNAL_PROJECT_SLUG (caller's org var)
+      #   env          → prod
+      #   path         → /github-actions
       infisical-identity-id:
-        description: 'Infisical OIDC machine identity UUID. When set, the workflow loads ANTHROPIC_API_KEY via OIDC instead of expecting it as a forwarded secret.'
+        description: 'Override the OIDC machine identity UUID. Defaults to the caller''s vars.INFISICAL_OIDC_IDENTITY_ID.'
         required: false
         type: string
         default: ''
       infisical-project-slug:
-        description: 'Infisical project containing ANTHROPIC_API_KEY (e.g. arete-internal). Required when infisical-identity-id is set.'
+        description: 'Override the Infisical project. Defaults to the caller''s vars.INFISICAL_INTERNAL_PROJECT_SLUG.'
         required: false
         type: string
         default: ''
       infisical-env:
-        description: 'Infisical environment slug (dev/prod). Required when infisical-identity-id is set.'
+        description: 'Override the Infisical environment slug. Defaults to prod.'
         required: false
         type: string
         default: ''
       infisical-path:
-        description: 'Infisical path containing ANTHROPIC_API_KEY (e.g. /areteos). Required when infisical-identity-id is set.'
+        description: 'Override the Infisical folder holding ANTHROPIC_API_KEY. Defaults to /github-actions (the shared CI key, not any app''s folder).'
         required: false
         type: string
         default: ''
@@ -102,25 +147,46 @@ jobs:
       - name: Checkout consumer repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.checkout-ref }}
+          ref: ${{ inputs.checkout-ref || github.event.repository.default_branch }}
           fetch-depth: 0
 
       - name: Checkout shared workflow assets (for system prompt)
         uses: actions/checkout@v4
         with:
           repository: aretecp/github-actions
+          # Public repo, so no token needed. See the shared-ref input: this must
+          # track the workflow's own major tag.
           ref: ${{ inputs.shared-ref }}
           path: .shared-actions
 
+      # Defaults are resolved HERE, not in the inputs block — `workflow_call`
+      # input defaults can't hold expressions, so `vars` / `github` context
+      # coalescing has to happen at the use site.
       - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
-        if: inputs.infisical-identity-id != ''
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        if: ${{ (inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID) != '' }}
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
           method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.infisical-project-slug }}
-          environment: ${{ inputs.infisical-env }}
-          path: ${{ inputs.infisical-path }}
+          identity-id: ${{ inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID }}
+          project-slug: ${{ inputs.infisical-project-slug || vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+          environment: ${{ inputs.infisical-env || 'prod' }}
+          path: ${{ inputs.infisical-path || '/github-actions' }}
+
+      # Fail fast with an actionable message rather than letting Claude die on an
+      # opaque auth error 60 seconds later. The likely cause in a newly-onboarded
+      # repo is that the org variable isn't visible to it.
+      - name: Verify an API key resolved
+        env:
+          FORWARDED_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ANTHROPIC_API_KEY resolved via Infisical OIDC."
+          elif [ -n "$FORWARDED_KEY" ]; then
+            echo "ANTHROPIC_API_KEY resolved via forwarded secret (legacy path)."
+          else
+            echo "::error::No ANTHROPIC_API_KEY available. For the OIDC path this repo needs: (1) the org variable INFISICAL_OIDC_IDENTITY_ID visible to it — check the 'selected repositories' list, (2) the OIDC identity trusted for this repo, and (3) read access on arete-internal/<env>/github-actions. Otherwise forward ANTHROPIC_API_KEY via the caller's secrets block."
+            exit 1
+          fi
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest
