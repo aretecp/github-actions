@@ -1,6 +1,6 @@
 # Plan: Claude Issue Triage — zero-config app shims + fleet migration
 
-**Status**: Draft
+**Status**: Done (6 of 7 repos live; areteos promotion open as aretecp/areteos#1450)
 **Created**: 2026-07-28
 **Last updated**: 2026-07-28
 
@@ -328,3 +328,52 @@ PR (the inline copies stay in git history).
   their own keys. The naming drift (`anthropic-api-key`, `ARILEARN_ANTHROPIC_API_KEY`) is worth a
   separate cleanup ticket.
 - Any change to `/work-issue` or the local `.claude/` command set.
+
+---
+
+## Final state (2026-07-28)
+
+### Live status
+
+| Repo | Live branch | Shim | Verified against a real issue |
+|---|---|---|---|
+| `arilearn-phx` | develop | zero-config `@v2` + `checkout-ref: main` | ✅ #1217 — labels + issue type `Task` |
+| `contact-intelligence` | master | zero-config `@v2` | ✅ #78 — `bug`/`infra`/`P2-high`, type `Bug` |
+| `beacon` | main | zero-config `@v2` | — |
+| `bd-pulse` | main | zero-config `@v2` | — (promoted independently by the team) |
+| `areteos-py` | main | zero-config `@v2` | — |
+| `ari-website` | main | zero-config `@v2` | — |
+| `areteos` | main | **still old `@v1`** | promotion open: aretecp/areteos#1450 (held on request) |
+| `infisical` | — | excluded by design | n/a |
+
+Net: **−424 lines** of duplicated workflow. Shared side released as `v2.5.1`.
+
+### Why areteos still matters
+
+Because `shared-ref` defaulted to `v1` on the v1 workflow, areteos pulls its *system prompt* from
+the frozen v1 tag. It therefore lacks label idempotency, the widened type-label strip list, and
+issue-type support regardless of what ships upstream. It is the only repo left in that state.
+
+### Bug found by the canary
+
+The first real run (`arilearn-phx#1217`) classified a chore issue as `chore` — a label outside the
+idempotency strip list, which covered only bug/enhancement/documentation. A re-run that
+reclassified would have left two type labels. Fixed in #66 by widening the strip list to all five
+fleet type labels, while explicitly NOT stripping `hotfix`/`security`/`released`/area labels, which
+are human-set and not types. Re-verified on contact-intelligence#78.
+
+This is the entire argument for the canary step: a green `actionlint` and a passing OIDC probe
+would never have caught it.
+
+### Discovered, filed, not fixed here
+
+- **contact-intelligence#78** — prod deploy broken since 2026-05-19; SSH to `VPS_TAILSCALE_IP`
+  times out. Surfaced by the promotion (the first deploy attempt in two months), not caused by it.
+  Nothing was deployed. bd-pulse deployed fine one minute earlier, so it is repo-specific drift.
+- **`pr-to-main-hooks.yml` has the same disease, worse** — 6 Infisical inputs. The
+  `/github-actions` folder would collapse it the same way.
+- **Nothing enforces the 4 `INFISICAL_*` repo variables on a new repo**, and a missing var resolves
+  to empty rather than erroring at config time. See [[project_arete_repo_level_gh_vars]].
+- **areteos-py has two priority-label schemes** — `priority-*` on 244+ issues plus `P1`–`P4`.
+  History untouched; remapping is a separate decision.
+- **contact-intelligence CI doesn't run on pushes to develop** — hence 2 months of lint drift.
