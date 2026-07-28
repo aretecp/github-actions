@@ -182,7 +182,22 @@ the OIDC-grant question in Phase 1.
       `ANTHROPIC_API_KEY`. *Confirmed present in `prod` by spike S3.*
 - [x] Grant the OIDC machine identity read on `arete-internal` `/github-actions`
       *Confirmed by spike S3.*
-- [ ] **Verify OIDC trust policy + org-var visibility covers the new repos.**
+- [ ] ⛔ **BLOCKED — R3 CONFIRMED (2026-07-28).** Probed both never-OIDC repos directly
+      (`contact-intelligence` run `30372414296`, `ari-website` run `30372418529`). Both failed at
+      the first step with `identity-id length: 0` — **the org variables are not visible to these
+      two repos**. The probe bailed before the Infisical call, so whether the OIDC identity trusts
+      them is still untested.
+
+      **Needs an org admin (not me — `gh api /orgs/aretecp/actions/variables/...` 403s):** add
+      `contact-intelligence` and `ari-website` to the selected-repositories list for both
+      `INFISICAL_OIDC_IDENTITY_ID` and `INFISICAL_INTERNAL_PROJECT_SLUG`. Then re-run the two
+      probes (branches `spike/oidc-probe` are still in place for exactly this) to confirm OIDC
+      trust before their shims land.
+
+      Unaffected: `bd-pulse`, `arilearn-phx`, `areteos-py` already use
+      `vars.INFISICAL_OIDC_IDENTITY_ID` in existing workflows, so they are not blocked by this.
+
+- [ ] Original wording of this check:
       `contact-intelligence` and `ari-website` have never used
       `vars.INFISICAL_OIDC_IDENTITY_ID` in any workflow, so neither the identity's subject filter
       nor the org variable's selected-repos list is confirmed for them. (I can't read org vars —
@@ -201,11 +216,13 @@ the OIDC-grant question in Phase 1.
 - [ ] Cut `v2.5.0`, move the `v2` tag
 - [ ] README: triage row says `v1` → change to `v2`
 
-### Phase 3 — canary
+### Phase 3 — canary (PRs open, awaiting human merge)
 
-- [ ] `areteos` → target shim, `@v1` → `@v2`, drop `with:` entirely
-- [ ] `beacon` → drop `with:` except `checkout-ref: develop`
-- [ ] File a real test issue in each; confirm the Infisical load, the triage comment, and labels
+- [x] `areteos` → target shim, `@v1` → `@v2`, drop `with:` entirely — **PR aretecp/areteos#1448**
+- [x] `beacon` → drop `with:` except `checkout-ref: develop` — **PR aretecp/beacon#128**
+- [ ] File a real test issue in each; confirm the Infisical load, the triage comment, and labels.
+      Blocked on the two PRs merging: `issues`-triggered workflows only run from the default
+      branch, so there is no way to exercise this from a feature branch.
 - [ ] Do not proceed to Phase 4 until both are green
 
 ### Phase 4 — migrate the 3 inline copies
