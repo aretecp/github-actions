@@ -339,7 +339,7 @@ runs:
         export-as-env: 'true'
 
     - name: Connect to Tailscale
-      uses: aretecp/github-actions/actions/tailscale-connect@v1
+      uses: aretecp/github-actions/actions/tailscale-connect@v2
       with:
         authkey: ${{ env.TAILSCALE_AUTHKEY }}
 

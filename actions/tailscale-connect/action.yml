@@ -34,3 +34,33 @@ runs:
       with:
         authkey: ${{ inputs.authkey }}
         version: ${{ inputs.version }}
+
+    # The upstream action retries `tailscale up` and then exits 0 EVEN IF every
+    # attempt failed. A dead auth key therefore produces a green "Connect to
+    # Tailscale" step, and the run fails much later at the ssh step with
+    # `dial tcp ***:22: i/o timeout` — which reads like a firewall or a wrong
+    # host, not an auth problem.
+    #
+    # Observed 2026-07-28 in contact-intelligence run 30380967420: five
+    # consecutive `backend error: invalid key: API key does not exist`, step
+    # reported success, ~3 minutes later an opaque SSH timeout. Cost about an
+    # hour to trace. Assert connectivity here so the failure names its cause.
+    - name: Verify tailnet connectivity
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        if ! command -v tailscale >/dev/null 2>&1; then
+          echo "::error::tailscale CLI not on PATH — the join step did not install it."
+          exit 1
+        fi
+
+        # `tailscale ip -4` only returns an address once the node is actually
+        # authenticated and up, so it doubles as the connectivity assertion.
+        # Deliberately not echoed: it identifies a host on the tailnet.
+        if ! TS_IP=$(tailscale ip -4 2>/dev/null | head -1) || [ -z "$TS_IP" ]; then
+          echo "::error::Not connected to the Tailscale tailnet. The join step above exits 0 even when every retry failed — scroll up for the real reason. Most common: TAILSCALE_AUTHKEY is expired or revoked ('invalid key: API key does not exist'). Auth keys expire (90 days max), so a workflow that last ran months ago will hit this. Mint a new key and update it wherever this workflow reads it from."
+          exit 1
+        fi
+
+        echo "Connected to tailnet as $(tailscale status --json 2>/dev/null | jq -r '.Self.HostName // "unknown"')."

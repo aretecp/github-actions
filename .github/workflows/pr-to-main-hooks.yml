@@ -131,7 +131,7 @@ jobs:
       # so project-specific values are the authoritative layer.
       - name: Load TEAMS_PR_NOTIFY_WEBHOOK_URL from Infisical (OIDC)
         if: inputs.infisical-identity-id != '' && inputs.infisical-shared-project-slug != ''
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
           method: oidc
           identity-id: ${{ inputs.infisical-identity-id }}
@@ -141,7 +141,7 @@ jobs:
 
       - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
         if: inputs.infisical-identity-id != '' && inputs.infisical-app-project-slug != ''
-        uses: aretecp/github-actions/actions/load-infisical-secrets@v1
+        uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
           method: oidc
           identity-id: ${{ inputs.infisical-identity-id }}
