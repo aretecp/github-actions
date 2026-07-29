@@ -20,13 +20,21 @@ name: PR to main — hooks (shared)
 # Two authentication paths for ANTHROPIC_API_KEY and
 # TEAMS_PR_NOTIFY_WEBHOOK_URL (mutually exclusive):
 #
-#   1. OIDC (preferred — no stored credentials in consumer repos):
-#      Caller provides `infisical-identity-id` plus app- and shared-source
-#      inputs. The workflow loads both secrets from Infisical via short-
-#      lived GitHub OIDC token at run time. ANTHROPIC_API_KEY comes from
-#      the app project (e.g. arete-internal/<env>/<repo-path>);
-#      TEAMS_PR_NOTIFY_WEBHOOK_URL comes from the shared project (default
-#      arete-shared/<env>/teams/pr-notify).
+#   1. OIDC (preferred — ZERO caller inputs):
+#      The workflow reads `vars.INFISICAL_OIDC_IDENTITY_ID`,
+#      `vars.INFISICAL_INTERNAL_PROJECT_SLUG` and
+#      `vars.INFISICAL_SHARED_PROJECT_SLUG` from the CALLER's own repo
+#      variables (unlike secrets, vars resolve against the caller —
+#      verified 2026-07-28, beacon run 30369406219), then loads
+#      ANTHROPIC_API_KEY from `arete-internal/prod/github-actions` and
+#      TEAMS_PR_NOTIFY_WEBHOOK_URL from `arete-shared/prod/teams/pr-notify`.
+#
+#      ANTHROPIC_API_KEY comes from the shared CI folder, NOT the app's own
+#      folder. Apps keep their key for app-runtime use; CI has its own so
+#      spend is attributable and revocation is isolated.
+#
+#      Every `infisical-*` input is an optional OVERRIDE. A consumer that
+#      wants the defaults passes no `with:` block at all.
 #
 #   2. Forwarded secrets (legacy — still works for backward compat):
 #      Caller forwards both secrets via `secrets:` block. Used when
@@ -53,47 +61,56 @@ on:
     inputs:
       environment:
         description: >-
-          Job environment scope. Required for env-level secret access in
-          private repos on GitHub Free. Default `production` matches where
-          legacy GH-stored secrets typically live; OIDC callers can leave
-          as default.
+          Job environment scope. Only needed for env-level secret access on the
+          legacy forwarded-secret path. Defaults to none: the OIDC path needs no
+          env-scoped secrets, and defaulting to `production` would run this
+          inside a deployment environment — where a required reviewer would
+          silently block it pending approval.
         required: false
         type: string
-        default: production
+        default: ''
       claude-model:
         description: 'Claude model alias for the summary step.'
         required: false
         type: string
         default: claude-sonnet-4-6
 
-      # --- OIDC path (preferred) ---
+      # --- OIDC path (preferred) — every input below is an optional OVERRIDE ---
+      # Leave them all unset and the workflow resolves:
+      #   identity-id        → vars.INFISICAL_OIDC_IDENTITY_ID      (caller's var)
+      #   app-project-slug   → vars.INFISICAL_INTERNAL_PROJECT_SLUG (caller's var)
+      #   app-env            → prod
+      #   app-path           → /github-actions   (shared CI key, not an app folder)
+      #   shared-project-slug→ vars.INFISICAL_SHARED_PROJECT_SLUG   (caller's var)
+      #   shared-env         → prod
+      #   shared-path        → /teams/pr-notify
       infisical-identity-id:
-        description: 'Infisical OIDC machine identity UUID. When set, the workflow loads secrets via OIDC instead of expecting forwarded secrets.'
+        description: 'Override the OIDC machine identity UUID. Defaults to the caller''s vars.INFISICAL_OIDC_IDENTITY_ID.'
         required: false
         type: string
         default: ''
       infisical-app-project-slug:
-        description: 'Infisical project for ANTHROPIC_API_KEY (e.g. arete-internal). Required when infisical-identity-id is set.'
+        description: 'Override the Infisical project for ANTHROPIC_API_KEY. Defaults to the caller''s vars.INFISICAL_INTERNAL_PROJECT_SLUG.'
         required: false
         type: string
         default: ''
       infisical-app-env:
-        description: 'Infisical environment slug for the app secrets (dev/prod). Required when infisical-identity-id is set.'
+        description: 'Override the Infisical environment slug for the app secrets. Defaults to prod.'
         required: false
         type: string
         default: ''
       infisical-app-path:
-        description: 'Infisical path containing ANTHROPIC_API_KEY (e.g. /areteos). Required when infisical-identity-id is set.'
+        description: 'Override the folder holding ANTHROPIC_API_KEY. Defaults to /github-actions — the shared CI key, deliberately not any app''s folder.'
         required: false
         type: string
         default: ''
       infisical-shared-project-slug:
-        description: 'Infisical project for TEAMS_PR_NOTIFY_WEBHOOK_URL.'
+        description: 'Override the Infisical project for TEAMS_PR_NOTIFY_WEBHOOK_URL. Defaults to the caller''s vars.INFISICAL_SHARED_PROJECT_SLUG.'
         required: false
         type: string
-        default: arete-shared
+        default: ''
       infisical-shared-env:
-        description: 'Infisical environment slug for the shared secrets. Required when infisical-identity-id is set.'
+        description: 'Override the Infisical environment slug for the shared secrets. Defaults to prod.'
         required: false
         type: string
         default: ''
@@ -129,25 +146,29 @@ jobs:
       # Load shared infra secrets FIRST so app-project keys (loaded next) can
       # override any collisions. Each load writes to $GITHUB_ENV last-write-wins,
       # so project-specific values are the authoritative layer.
+      # Defaults resolved HERE, not in the inputs block — `workflow_call` input
+      # defaults cannot hold expressions, so `vars` coalescing happens at the
+      # use site. Verified 2026-07-28 (beacon run 30369406219) that `vars`
+      # resolve against the CALLER's repo inside a reusable workflow.
       - name: Load TEAMS_PR_NOTIFY_WEBHOOK_URL from Infisical (OIDC)
-        if: inputs.infisical-identity-id != '' && inputs.infisical-shared-project-slug != ''
+        if: ${{ (inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID) != '' }}
         uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
           method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.infisical-shared-project-slug }}
-          environment: ${{ inputs.infisical-shared-env }}
+          identity-id: ${{ inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID }}
+          project-slug: ${{ inputs.infisical-shared-project-slug || vars.INFISICAL_SHARED_PROJECT_SLUG }}
+          environment: ${{ inputs.infisical-shared-env || 'prod' }}
           path: ${{ inputs.infisical-shared-path }}
 
       - name: Load ANTHROPIC_API_KEY from Infisical (OIDC)
-        if: inputs.infisical-identity-id != '' && inputs.infisical-app-project-slug != ''
+        if: ${{ (inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID) != '' }}
         uses: aretecp/github-actions/actions/load-infisical-secrets@v2
         with:
           method: oidc
-          identity-id: ${{ inputs.infisical-identity-id }}
-          project-slug: ${{ inputs.infisical-app-project-slug }}
-          environment: ${{ inputs.infisical-app-env }}
-          path: ${{ inputs.infisical-app-path }}
+          identity-id: ${{ inputs.infisical-identity-id || vars.INFISICAL_OIDC_IDENTITY_ID }}
+          project-slug: ${{ inputs.infisical-app-project-slug || vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+          environment: ${{ inputs.infisical-app-env || 'prod' }}
+          path: ${{ inputs.infisical-app-path || '/github-actions' }}
 
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest
