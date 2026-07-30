@@ -8,8 +8,9 @@ Reusable composite actions and workflows for `aretecp` repos. Drop-in `uses:` re
 |---|---|---|
 | [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime. Supports env export, JSON output, and bare dotenv file render (v2). | `v2` (`@v1` frozen) |
 | [`tailscale-connect`](actions/tailscale-connect) | Join the Areté Tailscale tailnet. Wraps `tailscale/github-action` with a pinned SHA and corrected input names. | `v1` |
+| [`teams-notify`](actions/teams-notify) | Post a MessageCard to a Teams incoming webhook. Semantic `status` colours, optional facts block and button, `dry-run` mode. Webhook passed via `env:`, not an input. | `v1` |
 
-More to come — Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
+More to come — Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
 
 > **`@v1` is frozen.** All existing consumers that pin `load-infisical-secrets@v1` are unaffected. The v2 `dotenv` render mode is additive — migrate one repo at a time via the [VPS deploy migration runbook](docs/runbooks/deploy-vps-migration.md).
 
@@ -23,6 +24,15 @@ More to come — Slack notify, Elixir/OTP setup, uv/Python setup. Each ships as 
 | [`pr-to-main-hooks.yml`](.github/workflows/pr-to-main-hooks.yml) | On PRs targeting `main`: gather context → Claude summary → update PR body + Closes #N footers → Teams card. | `v1` |
 
 Reusable workflows are called via `jobs.<name>.uses: aretecp/github-actions/.github/workflows/<file>@v1` in the consumer repo. See the workflow file's header comments for inputs and prerequisites.
+
+### Scheduled workflows (run here, not called)
+
+| Workflow | Description | Schedule |
+|---|---|---|
+| [`entra-secret-detector.yml`](.github/workflows/entra-secret-detector.yml) | Read-only Graph scan of every Entra app registration. Reports credentials nearing expiry and flags ones Terraform doesn't manage. Silent when nothing is in window. | `17 13 * * *` |
+
+Not `workflow_call` targets — these run in this repo on a cron. See
+[`docs/runbooks/entra-secret-detector.md`](docs/runbooks/entra-secret-detector.md).
 
 ### Zero-config consumer shim
 
