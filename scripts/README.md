@@ -6,9 +6,16 @@ For admin / local-execution scripts run by a maintainer, see [`../tools/`](../to
 
 ## Available scripts
 
-| Script | Description |
-|---|---|
-| [`wait-for-healthy.sh`](wait-for-healthy.sh) | Poll `docker inspect` for a list of containers until all report `healthy`, or timeout (with optional log dump on failure) |
+| Script | Description | Runs on |
+|---|---|---|
+| [`wait-for-healthy.sh`](wait-for-healthy.sh) | Poll `docker inspect` for a list of containers until all report `healthy`, or timeout (with optional log dump on failure) | VPS |
+| [`entra-credential-scan.sh`](entra-credential-scan.sh) | Enumerate every Entra app registration and report each credential's expiry as JSON, soonest-first. Read-only Graph query. | Runner |
+
+> **Note:** `entra-credential-scan.sh` is the exception to the "executed on the deploy
+> target" rule above — it runs on the GitHub runner, not a VPS, and is checked out
+> rather than curl'd. It lives here rather than in `tools/` because a workflow
+> consumes it, not a maintainer at a terminal. See
+> [`entra-secret-detector.yml`](../.github/workflows/entra-secret-detector.yml).
 
 ## Consuming a script in a workflow
 

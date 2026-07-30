@@ -1,0 +1,142 @@
+name: Teams Notify
+description: >-
+  Post a MessageCard to a Teams incoming webhook. Used by infra workflows that
+  need to reach the channel the team already watches — credential rotation
+  notices, deploy gates, dead-man's-switch heartbeats.
+
+# The webhook URL is a SECRET and is therefore NOT an input — pass it via
+# `env: TEAMS_WEBHOOK_URL` at the call site, per CONTRIBUTING.md.
+#
+# NOTE: `pr-to-main-hooks.yml` posts its own Teams card with inline bash that
+# predates this action. That's duplicated logic worth collapsing into this
+# action later — deliberately not done here to keep one logical change per PR,
+# and because that workflow is currently in flight on another branch.
+
+inputs:
+  title:
+    description: Card title. Shown in the Teams notification preview, so lead with the thing that matters.
+    required: true
+
+  text:
+    description: Body text. Markdown is supported by Teams MessageCards.
+    required: true
+
+  status:
+    description: >-
+      Semantic status controlling the card's accent colour.
+      One of `info`, `success`, `warning`, `failure`.
+    required: false
+    default: info
+
+  facts:
+    description: >-
+      Optional JSON array of {"name","value"} objects rendered as a key/value
+      block. Example: '[{"name":"App","value":"arilearn"}]'
+    required: false
+    default: '[]'
+
+  button-url:
+    description: Optional URL for a "view" button, also appended as an inline markdown link (Teams renders `potentialAction` buttons inconsistently).
+    required: false
+    default: ''
+
+  button-label:
+    description: Label for the button when `button-url` is set.
+    required: false
+    default: View
+
+  dry-run:
+    description: >-
+      Build and print the payload without posting. Lets smoke tests exercise
+      payload construction without spamming a real channel.
+    required: false
+    default: 'false'
+
+outputs:
+  payload:
+    description: The JSON payload that was sent (or would have been, under dry-run).
+    value: ${{ steps.post.outputs.payload }}
+
+runs:
+  using: composite
+  steps:
+    - name: Post card to Teams
+      id: post
+      shell: bash
+      env:
+        INPUT_TITLE: ${{ inputs.title }}
+        INPUT_TEXT: ${{ inputs.text }}
+        INPUT_STATUS: ${{ inputs.status }}
+        INPUT_FACTS: ${{ inputs.facts }}
+        INPUT_BUTTON_URL: ${{ inputs.button-url }}
+        INPUT_BUTTON_LABEL: ${{ inputs.button-label }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+
+        case "$INPUT_STATUS" in
+          info)    COLOR='0076D7' ;;
+          success) COLOR='2EA043' ;;
+          warning) COLOR='D29922' ;;
+          failure) COLOR='B60205' ;;
+          *)
+            echo "::error::status must be one of info|success|warning|failure (got '${INPUT_STATUS}')"
+            exit 1
+            ;;
+        esac
+
+        if ! printf '%s' "$INPUT_FACTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          echo "::error::facts must be a JSON array of {name,value} objects"
+          exit 1
+        fi
+
+        BODY="$INPUT_TEXT"
+        if [ -n "$INPUT_BUTTON_URL" ]; then
+          BODY="$(printf '%s\n\n[%s →](%s)' "$BODY" "$INPUT_BUTTON_LABEL" "$INPUT_BUTTON_URL")"
+        fi
+
+        # jq builds the payload so titles/bodies containing quotes, backticks or
+        # newlines can't break the JSON.
+        PAYLOAD=$(jq -n \
+          --arg title "$INPUT_TITLE" \
+          --arg text "$BODY" \
+          --arg color "$COLOR" \
+          --argjson facts "$INPUT_FACTS" \
+          --arg url "$INPUT_BUTTON_URL" \
+          --arg label "$INPUT_BUTTON_LABEL" \
+          '{
+             "@type": "MessageCard",
+             "@context": "http://schema.org/extensions",
+             themeColor: $color,
+             summary: $title,
+             title: $title,
+             sections: [{ text: $text } + (if ($facts | length) > 0 then { facts: $facts } else {} end)]
+           }
+           + (if $url != "" then
+                { potentialAction: [{ "@type": "OpenUri", name: $label,
+                                      targets: [{ os: "default", uri: $url }] }] }
+              else {} end)')
+
+        {
+          echo 'payload<<PAYLOAD_EOF'
+          printf '%s\n' "$PAYLOAD"
+          echo 'PAYLOAD_EOF'
+        } >> "$GITHUB_OUTPUT"
+
+        if [ "$INPUT_DRY_RUN" = "true" ]; then
+          echo "dry-run — not posting. Payload:"
+          printf '%s\n' "$PAYLOAD" | jq .
+          exit 0
+        fi
+
+        if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+          echo "::error::TEAMS_WEBHOOK_URL env var is required (pass it via env: at the call site, not as an input)"
+          exit 1
+        fi
+
+        # Fail loud on non-2xx so a revoked webhook surfaces as a red run rather
+        # than a notification that silently stopped arriving. A dead-man's-switch
+        # notifier that fails silently is worse than none at all.
+        curl -fsS -H 'Content-Type: application/json' \
+          -d "$PAYLOAD" "$TEAMS_WEBHOOK_URL" >/dev/null
+        echo "Posted to Teams."
