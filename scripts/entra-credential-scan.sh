@@ -78,20 +78,30 @@ echo "Scanned ${PAGES} page(s), $(wc -l < "$RAW" | tr -d ' ') app registration(s
 
 # Graph returns fractional seconds on endDateTime ("...:55.8238406Z"), which
 # fromdateiso8601 cannot parse — strip the fraction before converting.
+#
+# app_terraform_managed vs terraform_managed is the distinction that matters. An
+# app registration can carry several credentials and Terraform only knows about
+# the ones it created, so "this app is under Terraform" does NOT mean "this
+# credential can be rotated by the pipeline". A managed app with a hand-made
+# portal secret on the side is exactly what took arilearn prod down: the app
+# looked managed, the credential that expired was not.
 jq -s --argjson now "$(date -u +%s)" '
   [ .[] as $app
     | ( (($app.passwordCredentials // []) | map(. + {kind: "secret"}))
-      + (($app.keyCredentials      // []) | map(. + {kind: "certificate"})) )[]
+      + (($app.keyCredentials      // []) | map(. + {kind: "certificate"})) ) as $creds
+    | ($creds | map((.displayName // "") | startswith("terraform-managed")) | any) as $app_tf
+    | $creds[]
     | select(.endDateTime != null)
     | {
-        app:               ($app.displayName // "(unnamed app)"),
-        app_id:            $app.appId,
-        kind:              .kind,
-        name:              (.displayName // "(unnamed credential)"),
-        key_id:            .keyId,
-        expires:           .endDateTime,
-        days_left:         ((((.endDateTime | sub("\\.[0-9]+"; "")) | fromdateiso8601) - $now) / 86400 | floor),
-        terraform_managed: ((.displayName // "") | startswith("terraform-managed"))
+        app:                   ($app.displayName // "(unnamed app)"),
+        app_id:                $app.appId,
+        kind:                  .kind,
+        name:                  (.displayName // "(unnamed credential)"),
+        key_id:                .keyId,
+        expires:               .endDateTime,
+        days_left:             ((((.endDateTime | sub("\\.[0-9]+"; "")) | fromdateiso8601) - $now) / 86400 | floor),
+        terraform_managed:     ((.displayName // "") | startswith("terraform-managed")),
+        app_terraform_managed: $app_tf
       }
   ] | sort_by(.days_left)
 ' "$RAW"
