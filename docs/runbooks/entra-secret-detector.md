@@ -51,18 +51,43 @@ The federated credential's subject is pinned to
 
 ## Reading the output
 
-Every run writes a table to the job summary. It is **silent when nothing is in
-window** — no issue, no notification. A job that's green 360 days a year is a job
-nobody reads, so it only speaks up when there's something to say.
+Every run writes a table to the job summary **and to stdout**, so it is readable
+from `gh run view` — the REST API does not expose job summaries. It is **silent
+when nothing is in window** — no issue, no notification. A job that's green 360
+days a year is a job nobody reads, so it only speaks up when there's something
+to say.
 
 | Condition | Behaviour |
 |---|---|
-| Nothing in window | Job summary only. Closes any open tracking issue. |
+| Nothing in window | Report only. Closes any open tracking issue. |
 | Something within 30 days | Opens or **edits in place** a single issue labelled `entra-secret-expiry` |
-| Something already expired | Same, plus the run **fails** — something is broken in prod now, not approaching a deadline |
+| Something already expired | Same, plus a warning annotation, plus a Teams re-nag every 7 days until resolved |
 
 The issue is reused and edited rather than recreated, otherwise a daily cron
 accumulates 30 duplicates.
+
+### A finding is not a job failure
+
+**A red run means the detector broke** — 403, token exchange failed, Graph
+unreachable. It does *not* mean a credential expired.
+
+This used to `exit 1` on any expired credential. That overloaded the signal: once
+the run was red every day for a known expiry, a genuinely broken watchdog became
+indistinguishable from the expected noise, which is the exact failure this exists
+to prevent. Findings travel by issue and Teams, where someone acts on them.
+
+### Rotatable ≠ the app is in Terraform
+
+The report separates two things that are easy to conflate:
+
+- **`Rotatable by pipeline`** describes **that credential**, not its app.
+- A dedicated **⚠️ section** lists credentials sitting on Terraform-managed apps
+  that Terraform did *not* create.
+
+An app registration can hold several credentials and Terraform only knows the
+ones it made. Seeing an app in the workspace and assuming its secrets are handled
+is how the arilearn secret expired unnoticed — the app looked managed; the
+credential that died was hand-made in the portal.
 
 ## Teams notifications
 
