@@ -153,6 +153,18 @@ on:
         type: boolean
         default: true
 
+      compose-up-timeout:
+        description: >-
+          SSH command timeout for the compose-up step, as a Go duration
+          (e.g. `45m`). When `compose-build` is `true` this step builds the
+          image on the VPS, so it has to outlast a COLD build — a dependency
+          bump invalidates the cached dependency layer and the whole tree
+          recompiles. Raise this for an app whose cold build is slow; the
+          default suits the current Areté services.
+        required: false
+        type: string
+        default: 30m
+
       env-file-name:
         description: >-
           Filename for the rendered env file on the VPS, relative to `repo-dir`.
@@ -312,6 +324,7 @@ jobs:
           repo-url: ${{ inputs.repo-url }}
           compose-file: ${{ inputs.compose-file }}
           compose-build: ${{ inputs.compose-build }}
+          compose-up-timeout: ${{ inputs.compose-up-timeout }}
           env-file-name: ${{ inputs.env-file-name }}
           ref: ${{ inputs.ref }}
           allow-clone: ${{ inputs.allow-clone }}
