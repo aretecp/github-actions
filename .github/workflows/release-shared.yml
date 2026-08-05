@@ -50,6 +50,17 @@ on:
         required: false
         type: string
         default: '22'
+      close-released-issues:
+        description: >-
+          Close the issues that released PRs said they would close. Needed only
+          for a `develop` -> `main` flow: GitHub acts on `Closes #N` when a PR
+          merges into the DEFAULT branch, so PRs targeting `develop` never fire
+          it, and promoting to `main` later does not re-scan them. Opt-in,
+          because closing issues on another repo's behalf should be a decision
+          rather than something a shared workflow starts doing on its own.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   release:
@@ -140,6 +151,104 @@ jobs:
         run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub acts on `Closes #N` only when a PR merges into the DEFAULT
+      # branch. On a `develop` -> `main` flow those PRs merge into `develop`,
+      # so it never fires, and the later promotion does not re-scan them — the
+      # issues stay open indefinitely. Close them here, where they are in fact
+      # released.
+      #
+      # Only PRs whose base was NOT the default branch are considered. That is
+      # exactly the set GitHub skipped; it also excludes the promotion PR
+      # itself, which matters because a release-PR template can carry
+      # placeholder text like `Closes #123` that must never close anything.
+      #
+      # `closingIssuesReferences` would be the natural source here, but GitHub
+      # does not populate it for a PR whose base is not the default branch —
+      # verified empirically against a real promotion, where every PR reported
+      # zero refs despite its body saying `Closes #N`. Hence the text scan.
+      #
+      # Never fails the job: the release has already happened by this point, so
+      # a bookkeeping problem must not present as a failed release.
+      - name: Close issues released by this version
+        if: inputs.close-released-issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BEFORE_TAG: ${{ steps.before.outputs.tag }}
+        run: |
+          set -uo pipefail
+
+          LATEST_TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || echo none)
+          if [[ "$LATEST_TAG" == "$BEFORE_TAG" || "$LATEST_TAG" == "none" ]]; then
+            echo "No new release — nothing to close."
+            exit 0
+          fi
+
+          # Without a previous tag the range is unbounded, and scanning all
+          # history could close anything ever referenced. Refuse instead.
+          if [[ "$BEFORE_TAG" == "none" ]]; then
+            echo "No previous tag — skipping (cannot bound the released range)."
+            exit 0
+          fi
+
+          echo "Scanning ${BEFORE_TAG}..${LATEST_TAG} for released pull requests."
+
+          # Ask GitHub which PR each commit belongs to rather than parsing
+          # commit subjects: this covers merge, squash and rebase uniformly.
+          PRS=$(for sha in $(git rev-list "${BEFORE_TAG}..${LATEST_TAG}"); do
+                  gh api "repos/$REPO/commits/$sha/pulls" --jq '.[].number' 2>/dev/null
+                done | sort -un)
+
+          [[ -z "$PRS" ]] && { echo "No pull requests in range."; exit 0; }
+
+          # `\s+#` is deliberate: it refuses to match `owner/repo#5`, which
+          # would otherwise close THIS repo's #5. Cross-repo closes stay manual.
+          KEYWORDS='(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\K\d+'
+
+          CLOSED=(); SKIPPED=(); FAILED=()
+          for pr in $PRS; do
+            BASE=$(gh pr view "$pr" --repo "$REPO" --json baseRefName -q .baseRefName 2>/dev/null) || continue
+            [[ "$BASE" == "$DEFAULT_BRANCH" ]] && continue
+
+            # Description only. GitHub's closing-keyword contract is the PR
+            # description; scanning the title too would close on a passing
+            # mention like "fixes #12 regression".
+            BODY=$(gh pr view "$pr" --repo "$REPO" --json body -q '.body // ""' 2>/dev/null) || continue
+
+            for issue in $(printf '%s' "$BODY" | grep -oP "$KEYWORDS" | sort -un); do
+              # Issues and PRs share one number sequence, so a reference can
+              # point at a PR, a deleted issue, or one already closed.
+              KIND=$(gh api "repos/$REPO/issues/$issue" \
+                       --jq 'if .pull_request then "pr" else .state end' 2>/dev/null) || KIND="missing"
+
+              if [[ "$KIND" != "open" ]]; then
+                SKIPPED+=("#$issue ($KIND, via #$pr)")
+                continue
+              fi
+
+              if gh issue close "$issue" --repo "$REPO" -r completed \
+                   -c "Released in ${LATEST_TAG} (#${pr})." >/dev/null 2>&1; then
+                CLOSED+=("#$issue (via #$pr)")
+              else
+                FAILED+=("#$issue (via #$pr)")
+              fi
+            done
+          done
+
+          {
+            echo "### Issues closed by ${LATEST_TAG}"
+            if [[ ${#CLOSED[@]} -gt 0 ]]; then printf -- '- %s\n' "${CLOSED[@]}"; else echo "_None._"; fi
+            if [[ ${#SKIPPED[@]} -gt 0 ]]; then echo; echo "Skipped:"; printf -- '- %s\n' "${SKIPPED[@]}"; fi
+            if [[ ${#FAILED[@]}  -gt 0 ]]; then echo; echo "Failed:";  printf -- '- %s\n' "${FAILED[@]}"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ${#FAILED[@]} -gt 0 ]]; then
+            printf '::warning::Could not close %s\n' "${FAILED[@]}"
+          fi
+
+          exit 0
 
       - name: Trigger production deploy if new release
         if: inputs.deploy-workflow != ''
