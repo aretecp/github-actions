@@ -84,8 +84,24 @@ jobs:
     name: ${{ matrix.image }}:${{ matrix.tag }}
     needs: discover
     runs-on: ubuntu-latest
+
+    # A job that never gets a runner should fail in 30 minutes with a clear
+    # reason, not sit for 40 and then report as a plain red check. Observed
+    # 2026-08-06: five of six builds queued 16-40m with zero steps executed and
+    # surfaced as `fail` in `gh pr checks`, which reads as "the build broke"
+    # rather than "no runner was ever assigned".
+    timeout-minutes: 30
+
     strategy:
       fail-fast: false
+      # Cap the fan-out. The manifest has six images, so an uncapped matrix asks
+      # for six concurrent GitHub-hosted runners at once — from the same org-wide
+      # concurrency budget that every app's deploy, release and PR-hook workflow
+      # draws on. This workflow is the least urgent consumer of that budget
+      # (Dockerfile changes and a weekly cron) and was the largest single
+      # requester, so it should not be able to crowd out a production deploy.
+      # Two at a time is ~20 minutes wall clock for all six, which is fine here.
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
 
     env:
