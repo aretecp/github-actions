@@ -123,7 +123,16 @@ jobs:
       # their next run.
       - name: Smoke test
         run: |
-          docker run --rm '${{ steps.tags.outputs.moving }}' \
+          # HOME is set to /github/home, backed by an empty tmpfs, to mirror how
+          # a GitHub Actions container job actually runs: the runner starts the
+          # job container with `-e HOME=/github/home` and mounts an empty
+          # per-job dir there. Plain `docker run` would use the image's own
+          # HOME=/root, which silently passes any tool installed under the
+          # image's home dir but invisible to the consumer at runtime — the
+          # exact failure this smoke gate exists to catch.
+          docker run --rm \
+            -e HOME=/github/home --tmpfs /github/home \
+            '${{ steps.tags.outputs.moving }}' \
             bash -euc "$(cat 'images/${{ matrix.dir }}/smoke.sh')"
 
       # Pushes only from main / schedule / dispatch. PRs build and smoke-test
