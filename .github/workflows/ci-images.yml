@@ -45,7 +45,10 @@ jobs:
   # no edit to this workflow.
   discover:
     name: Discover images
-    runs-on: ubuntu-latest
+    # Self-hosted like every other job here. actions/github-script runs on the
+    # runner's own bundled node, so this reads the manifest without assuming
+    # jq (or any other tool) is installed on the host.
+    runs-on: [self-hosted, omarchy]
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
     steps:
@@ -53,8 +56,14 @@ jobs:
 
       - name: Read image manifest
         id: read
-        run: |
-          echo "matrix=$(jq -c '{include: .}' images/manifest.json)" >> "$GITHUB_OUTPUT"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const images = JSON.parse(fs.readFileSync('images/manifest.json', 'utf8'));
+            core.setOutput('matrix', JSON.stringify({ include: images }));
+            core.info(`Building ${images.length} image(s): ` +
+              images.map(i => `${i.image}:${i.tag}`).join(', '));
 
   build:
     name: ${{ matrix.image }}:${{ matrix.tag }}
