@@ -43,12 +43,44 @@ this repo (`base_branch: main` in `AGENTS.md`, and history shows feature→main)
 | #78 `feat(release)`: close released issues | **Approve with changes.** Inert on merge (opt-in, nobody sets it). Fix before any repo opts in. | Not to merge; yes before opting in |
 | #79 `feat(images)`: CI base images | **Request changes.** One confirmed defect that breaks `areteos` + `arilearn-phx` CI, and the smoke tests structurally cannot catch it. | **Yes** |
 
-Consumer inventory (verified by org-wide code search):
+## Consumer inventory
 
-- `deploy-vps-shared.yml` / `rollback-vps-shared.yml` → `areteos`, `bd-pulse`, all pinned `@v2`
-- `release-shared.yml` → `areteos` only, pinned `@v1`
-- Container CI jobs affected by #79 → `areteos` (ci.yml, desktop-ci.yml), `areteos-py` (backend +
-  frontend), `arilearn-phx` (two jobs), `beacon`
+> **The original inventory in this section was wrong and has been replaced.** It said
+> `deploy-vps-shared.yml` had two consumers. It has **nine**. Do not use the old numbers for sizing
+> the blast radius of a change to any shared workflow.
+
+**Verified 2026-08-06** by walking `main` / `master` / `develop` on every non-archived org repo:
+82 hits, **0 read failures**.
+
+| Shared workflow | Consumers |
+|---|---|
+| `deploy-vps-shared.yml` | **9** — `areteos`, `areteos-py`, `ari-command-center`, `ari-vendor-matching`, `bd-pulse`, `beacon`, `litellm-gateway`, `performance-review`, `watterson-vendor-matching` |
+| `rollback-vps-shared.yml` | 2 — `areteos`, `bd-pulse` |
+| `copy-prod-db-shared.yml` | 2 — `areteos`, `bd-pulse` |
+| `release-shared.yml` | **3** — `areteos`, `beacon`, `ms-365-mcp-server` (not `areteos` alone) |
+| `pr-to-main-hooks.yml` | **4** — `areteos`, `arilearn-phx`, `bd-pulse`, `beacon` |
+| Container CI jobs affected by `#79` | `areteos` (ci.yml, desktop-ci.yml), `areteos-py` (backend + frontend), `arilearn-phx` (**two** jobs), `beacon` |
+
+Several repos carry the same deploy shims on **both** `main` and `develop` (`ari-command-center`,
+`bd-pulse`, `beacon`, `litellm-gateway`, `watterson-vendor-matching`) — worth a look on its own, it
+suggests half-finished migrations.
+
+### How to inventory consumers, and how not to
+
+Two methods failed here. Both failure modes are silent, which is why the wrong numbers survived
+into a review.
+
+1. **`gh search code` only indexes the DEFAULT branch.** In a develop-flow org, adoption lands on
+   `develop` first, so a code search is structurally blind to the newest consumers — exactly the
+   ones a change is most likely to surprise. `performance-review` surfaced only because it appeared
+   in a screenshot of a stuck deploy.
+2. **A tree walk that pipes errors to `2>/dev/null` drops repos to rate limiting.** `areteos`
+   vanished from its own output. Retry with backoff and log what could not be read — a count of
+   zero must be distinguishable from a failed read.
+
+The working recipe: enumerate non-archived repos → for each, enumerate `main`/`master`/`develop` →
+`git/trees?recursive=1` for workflow paths → fetch each with retries → grep for
+`aretecp/github-actions/...@ref`. Assert the failure log is empty before trusting the result.
 
 ---
 
