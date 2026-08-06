@@ -27,8 +27,15 @@ RUN apt-get update -qq \
         libayatana-appindicator3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# The slim image ships the toolchain without clippy/rustfmt. desktop/
-# rust-toolchain.toml pins the `stable` channel, which is what this tag
-# bootstraps, so adding the components here targets the same toolchain the
-# workspace resolves.
-RUN rustup component add clippy rustfmt
+# Consumers pin `channel = "stable"` in rust-toolchain.toml, and rustup treats
+# `stable` as a DIFFERENT toolchain from the `1.97.0` this tag bootstraps — so
+# components added to the default alone would never be the ones cargo uses.
+# Install both: the pinned default (for anything invoking cargo outside a
+# workspace) and `stable` with the components consumers actually resolve.
+#
+# `stable` moves between weekly rebuilds. That degrades gracefully: rustup
+# fetches the newer toolchain in-job exactly as it did before this image
+# existed. Baking it just makes the common case free.
+RUN rustup component add clippy rustfmt \
+    && rustup toolchain install stable --profile minimal \
+        --component clippy --component rustfmt
