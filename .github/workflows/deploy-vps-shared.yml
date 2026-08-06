@@ -325,11 +325,22 @@ jobs:
     # direction to be wrong in, and it does not apply today — every Areté app
     # runs dev and prod on one host out of one directory (see the
     # `--remove-orphans` note in vps-deploy-core).
+    #
+    # `github.repository` (the CALLER's repo) leads the key as a blast-radius
+    # guard. Whether `inputs` resolves inside a called workflow's job-level
+    # `concurrency` is not something this repo has verified; if it ever came back
+    # empty, a key of `vps--` would serialise every deploy across all NINE repos
+    # that call this workflow — areteos, areteos-py, ari-command-center,
+    # ari-vendor-matching, bd-pulse, beacon, litellm-gateway, performance-review,
+    # watterson-vendor-matching. With the repo in front, that degrades to
+    # per-repo serialisation, which is still strictly better than today. It costs
+    # nothing when the inputs do resolve: different repos already use different
+    # `repo-dir` paths.
     concurrency:
       group: >-
         ${{ inputs.deploy-concurrency-group != ''
             && inputs.deploy-concurrency-group
-            || format('vps-{0}-{1}', inputs.vps-user, inputs.repo-dir) }}
+            || format('vps-{0}-{1}-{2}', github.repository, inputs.vps-user, inputs.repo-dir) }}
       # Never cancel a deploy mid-recreate — queue behind it instead.
       cancel-in-progress: false
 

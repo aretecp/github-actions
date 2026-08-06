@@ -233,7 +233,7 @@ jobs:
       group: >-
         ${{ inputs.deploy-concurrency-group != ''
             && inputs.deploy-concurrency-group
-            || format('vps-{0}-{1}', inputs.vps-user, inputs.repo-dir) }}
+            || format('vps-{0}-{1}-{2}', github.repository, inputs.vps-user, inputs.repo-dir) }}
       # Never cancel a DB copy mid-restore; it would leave dev with a truncated
       # database and its container down.
       cancel-in-progress: false
