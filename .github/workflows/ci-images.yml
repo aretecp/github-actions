@@ -1,0 +1,147 @@
+name: CI base images
+
+# Builds and publishes the org's CI base images to GHCR.
+#
+# Why these exist: every consuming workflow used to open with an
+# `apt-get install` of the same packages on every run. On a runner host with
+# slow fsync that single step reached 16 minutes (dpkg fsyncs each unpacked
+# file); even on a fast host it is pure repeated work plus an apt mirror
+# dependency in the critical path of every PR. Baking the packages into an
+# image moves that cost to this workflow, which runs only when a Dockerfile
+# changes or on the weekly refresh.
+#
+# Scope rule: only toolchain and OS packages belong in these images. Anything
+# version-coupled to application source (node_modules, Playwright browsers,
+# mix deps) stays in the consuming workflow behind actions/cache, or the image
+# silently goes stale against the repo that depends on it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/**'
+      - '.github/workflows/ci-images.yml'
+  pull_request:
+    paths:
+      - 'images/**'
+      - '.github/workflows/ci-images.yml'
+  # Weekly rebuild so published images pick up Debian security updates even
+  # when no Dockerfile changed. Sunday 04:17 UTC — off-hours, off the hour.
+  schedule:
+    - cron: '17 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-images-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+# RUNNER CHOICE — this workflow is the org's exception, and deliberately so.
+#
+# Everything else in the fleet targets `[self-hosted, omarchy]`. It cannot here:
+# this repo is PUBLIC, and the org's runner group sets
+# `allows_public_repositories: false`. Jobs from a public repo are never
+# offered to those runners, so a self-hosted job here queues forever while the
+# runners sit idle. (The consuming repos are all private, which is why their
+# jobs run fine.)
+#
+# Do NOT "fix" that by flipping `allows_public_repositories`. Self-hosted
+# runners on a public repo means a fork PR can execute arbitrary code on the
+# runner host — which here is a workstation whose Docker socket these very
+# jobs use. GitHub warns against exactly this configuration.
+#
+# Hosted runners cost nothing that matters here: the images are pushed to GHCR
+# and *pulled* by the self-hosted runners, and this workflow only runs when a
+# Dockerfile changes or on the weekly refresh.
+
+jobs:
+  # images/manifest.json is the single source of truth for what gets built and
+  # under which name. Adding an image is a Dockerfile plus a manifest entry —
+  # no edit to this workflow.
+  discover:
+    name: Discover images
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read image manifest
+        id: read
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const images = JSON.parse(fs.readFileSync('images/manifest.json', 'utf8'));
+            core.setOutput('matrix', JSON.stringify({ include: images }));
+            core.info(`Building ${images.length} image(s): ` +
+              images.map(i => `${i.image}:${i.tag}`).join(', '));
+
+  build:
+    name: ${{ matrix.image }}:${{ matrix.tag }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+
+    env:
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Two tags per image:
+      #   <tag>                       moving; what consumers pin. Tracks OS
+      #                               patches for a fixed toolchain version.
+      #   <tag>-<yyyymmdd>-<sha7>     immutable; for bisecting a bad refresh
+      #                               or pinning strictly.
+      # This mirrors the repo's @v1 convention: the moving tag encodes the
+      # contract (toolchain version), not the build.
+      - name: Compute tags
+        id: tags
+        run: |
+          ref="${REGISTRY}/${{ matrix.image }}"
+          stamp="$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+          {
+            echo "moving=${ref}:${{ matrix.tag }}"
+            echo "pinned=${ref}:${{ matrix.tag }}-${stamp}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build --pull \
+            --tag '${{ steps.tags.outputs.moving }}' \
+            --tag '${{ steps.tags.outputs.pinned }}' \
+            'images/${{ matrix.dir }}'
+
+      # Prove the image can actually do the job before it is published. A
+      # missing package here is a red PR check instead of six repos failing
+      # their next run.
+      - name: Smoke test
+        run: |
+          docker run --rm '${{ steps.tags.outputs.moving }}' \
+            bash -euc "$(cat 'images/${{ matrix.dir }}/smoke.sh')"
+
+      # Pushes only from main / schedule / dispatch. PRs build and smoke-test
+      # so a broken Dockerfile cannot merge, but publish nothing.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push '${{ steps.tags.outputs.moving }}'
+          docker push '${{ steps.tags.outputs.pinned }}'
+
+      # The runner is ephemeral, so nothing needs tidying up — but the token
+      # should not outlive the job that used it.
+      - name: Log out of GHCR
+        if: always() && github.event_name != 'pull_request'
+        run: docker logout ghcr.io || true

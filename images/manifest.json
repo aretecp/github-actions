@@ -1,0 +1,38 @@
+[
+  {
+    "dir": "elixir-1.18.4-otp-27",
+    "image": "ci-elixir",
+    "tag": "1.18.4-otp-27",
+    "consumers": "areteos (ci.yml)"
+  },
+  {
+    "dir": "elixir-1.19.5-otp-28",
+    "image": "ci-elixir",
+    "tag": "1.19.5-otp-28",
+    "consumers": "arilearn-phx (ci.yml)"
+  },
+  {
+    "dir": "python-uv-3.12",
+    "image": "ci-python-uv",
+    "tag": "3.12",
+    "consumers": "areteos-py (ci.yml, backend)"
+  },
+  {
+    "dir": "python-3.12",
+    "image": "ci-python",
+    "tag": "3.12",
+    "consumers": "beacon (ci.yml)"
+  },
+  {
+    "dir": "node-22",
+    "image": "ci-node",
+    "tag": "22",
+    "consumers": "areteos-py (ci.yml, frontend)"
+  },
+  {
+    "dir": "rust-tauri",
+    "image": "ci-rust-tauri",
+    "tag": "1.97",
+    "consumers": "areteos (desktop-ci.yml)"
+  }
+]
