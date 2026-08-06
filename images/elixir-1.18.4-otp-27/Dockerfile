@@ -27,6 +27,14 @@ RUN apt-get update -qq \
     && rm -rf /var/lib/apt/lists/*
 
 # Hex/Rebar are not preinstalled on the hexpm image.
+#
+# MIX_HOME/HEX_HOME must be SYSTEM paths, not $HOME. A GitHub Actions container
+# job runs with HOME=/github/home — an empty per-job mount — so archives
+# installed to /root/.mix at build time are invisible at runtime and
+# `mix deps.get` fails with "Could not find Hex". Same reasoning as
+# UV_PYTHON_INSTALL_DIR below; both must resolve regardless of HOME.
+ENV MIX_HOME=/usr/local/lib/mix \
+    HEX_HOME=/usr/local/lib/hex
 RUN mix local.hex --force && mix local.rebar --force
 
 # uv + a managed interpreter power the generic Python tool/code steps (Tool

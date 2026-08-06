@@ -17,4 +17,10 @@ RUN apt-get update -qq \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# MIX_HOME/HEX_HOME must be SYSTEM paths, not $HOME. A GitHub Actions container
+# job runs with HOME=/github/home — an empty per-job mount — so archives
+# installed to /root/.mix at build time are invisible at runtime and
+# `mix deps.get` fails with "Could not find Hex".
+ENV MIX_HOME=/usr/local/lib/mix \
+    HEX_HOME=/usr/local/lib/hex
 RUN mix local.hex --force && mix local.rebar --force
