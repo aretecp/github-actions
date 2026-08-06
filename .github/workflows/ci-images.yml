@@ -67,11 +67,11 @@ jobs:
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read image manifest
         id: read
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
@@ -92,7 +92,7 @@ jobs:
       REGISTRY: ghcr.io/${{ github.repository_owner }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Two tags per image:
       #   <tag>                       moving; what consumers pin. Tracks OS
