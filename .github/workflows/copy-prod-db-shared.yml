@@ -208,11 +208,36 @@ on:
         type: string
         default: ''
 
+      deploy-concurrency-group:
+        description: >-
+          Override the serialisation key for VPS operations. Defaults to
+          `vps-<vps-user>-<repo-dir>`. Must match the value passed to
+          `deploy-vps-shared` and `rollback-vps-shared` for the same target — a
+          DB copy stops and starts the dev app container in `repo-dir`, so it
+          must not overlap a deploy.
+        required: false
+        type: string
+        default: ''
+
 jobs:
   copy-db:
     name: Copy prod DB → dev (${{ inputs.db-type }})
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+
+    # Same target-scoped key as deploy-vps-shared (see the long comment there).
+    # This workflow stops the dev app container, clobbers its database and starts
+    # it again, all inside `repo-dir` — overlapping a deploy that is recreating
+    # those same containers corrupts both.
+    concurrency:
+      group: >-
+        ${{ inputs.deploy-concurrency-group != ''
+            && inputs.deploy-concurrency-group
+            || format('vps-{0}-{1}', inputs.vps-user, inputs.repo-dir) }}
+      # Never cancel a DB copy mid-restore; it would leave dev with a truncated
+      # database and its container down.
+      cancel-in-progress: false
+
     permissions:
       id-token: write
       contents: read

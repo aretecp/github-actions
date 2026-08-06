@@ -226,11 +226,38 @@ on:
         type: string
         default: ''
 
+      deploy-concurrency-group:
+        description: >-
+          Override the serialisation key for VPS operations. Defaults to
+          `vps-<vps-user>-<repo-dir>`. Must match the value passed to
+          `deploy-vps-shared` and `copy-prod-db-shared` for the same target, or
+          a rollback can race a deploy in the shared `repo-dir`.
+        required: false
+        type: string
+        default: ''
+
 jobs:
   rollback:
     name: Rollback VPS (${{ inputs.environment }}) → ${{ inputs.version }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+
+    # Same target-scoped key as deploy-vps-shared (see the long comment there),
+    # so a rollback cannot race a deploy in the shared `repo-dir`.
+    #
+    # But `cancel-in-progress: true` here, unlike deploy. Rollback is the
+    # break-glass path: an operator invoking it has decided the running deploy is
+    # wrong. Queueing it behind that deploy — up to `compose-up-timeout`, now 30m
+    # on a cold build — is the wrong answer at the worst moment. Pre-empting
+    # leaves containers half-recreated, which is precisely what this workflow
+    # then fixes.
+    concurrency:
+      group: >-
+        ${{ inputs.deploy-concurrency-group != ''
+            && inputs.deploy-concurrency-group
+            || format('vps-{0}-{1}', inputs.vps-user, inputs.repo-dir) }}
+      cancel-in-progress: true
+
     permissions:
       id-token: write
       contents: read
