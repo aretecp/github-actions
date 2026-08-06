@@ -39,16 +39,31 @@ permissions:
   contents: read
   packages: write
 
+# RUNNER CHOICE — this workflow is the org's exception, and deliberately so.
+#
+# Everything else in the fleet targets `[self-hosted, omarchy]`. It cannot here:
+# this repo is PUBLIC, and the org's runner group sets
+# `allows_public_repositories: false`. Jobs from a public repo are never
+# offered to those runners, so a self-hosted job here queues forever while the
+# runners sit idle. (The consuming repos are all private, which is why their
+# jobs run fine.)
+#
+# Do NOT "fix" that by flipping `allows_public_repositories`. Self-hosted
+# runners on a public repo means a fork PR can execute arbitrary code on the
+# runner host — which here is a workstation whose Docker socket these very
+# jobs use. GitHub warns against exactly this configuration.
+#
+# Hosted runners cost nothing that matters here: the images are pushed to GHCR
+# and *pulled* by the self-hosted runners, and this workflow only runs when a
+# Dockerfile changes or on the weekly refresh.
+
 jobs:
   # images/manifest.json is the single source of truth for what gets built and
   # under which name. Adding an image is a Dockerfile plus a manifest entry —
   # no edit to this workflow.
   discover:
     name: Discover images
-    # Self-hosted like every other job here. actions/github-script runs on the
-    # runner's own bundled node, so this reads the manifest without assuming
-    # jq (or any other tool) is installed on the host.
-    runs-on: [self-hosted, omarchy]
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.read.outputs.matrix }}
     steps:
@@ -68,18 +83,12 @@ jobs:
   build:
     name: ${{ matrix.image }}:${{ matrix.tag }}
     needs: discover
-    runs-on: [self-hosted, omarchy]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
 
     env:
-      # The runner's HOME is read-only on this host, so both `docker login`
-      # (which writes a config) and `docker build` need the CLI config dir
-      # pointed somewhere writable. RUNNER_TEMP resolves under that same
-      # read-only root here, so use /tmp — the one location guaranteed
-      # writable and independent of both HOME and RUNNER_TEMP.
-      DOCKER_CONFIG: /tmp/docker-config-${{ github.run_id }}-${{ strategy.job-index }}
       REGISTRY: ghcr.io/${{ github.repository_owner }}
 
     steps:
@@ -131,14 +140,8 @@ jobs:
           docker push '${{ steps.tags.outputs.moving }}'
           docker push '${{ steps.tags.outputs.pinned }}'
 
-      # Leave no credential file and no accumulating tags on the shared runner
-      # host. The layer cache survives (that is the point); only the named
-      # references are dropped.
-      - name: Clean up
-        if: always()
-        run: |
-          docker logout ghcr.io || true
-          rm -rf "${DOCKER_CONFIG}"
-          docker image rm \
-            '${{ steps.tags.outputs.pinned }}' \
-            '${{ steps.tags.outputs.moving }}' 2>/dev/null || true
+      # The runner is ephemeral, so nothing needs tidying up — but the token
+      # should not outlive the job that used it.
+      - name: Log out of GHCR
+        if: always() && github.event_name != 'pull_request'
+        run: docker logout ghcr.io || true
