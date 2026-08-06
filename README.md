@@ -30,6 +30,7 @@ Reusable workflows are called via `jobs.<name>.uses: aretecp/github-actions/.git
 | Workflow | Description | Schedule |
 |---|---|---|
 | [`entra-secret-detector.yml`](.github/workflows/entra-secret-detector.yml) | Read-only Graph scan of every Entra app registration. Reports credentials nearing expiry and flags ones Terraform doesn't manage. Silent when nothing is in window. | `17 13 * * *` |
+| [`ci-images.yml`](.github/workflows/ci-images.yml) | Build + publish the CI base images in [`images/`](images) to GHCR. Also runs on change to `images/**`. | `17 4 * * 0` |
 
 Not `workflow_call` targets — these run in this repo on a cron. See
 [`docs/runbooks/entra-secret-detector.md`](docs/runbooks/entra-secret-detector.md).
@@ -68,6 +69,25 @@ triage against something other than your default branch.
 > The CI key in `/github-actions` is deliberately separate from each app's own
 > `ANTHROPIC_API_KEY`. Apps keep theirs for runtime use; CI has its own so spend is attributable
 > and revocation is isolated.
+
+## CI base images ([`images/`](images))
+
+Prebuilt container images for CI jobs, published to GHCR. A consuming workflow sets
+`container.image` and deletes its `Install OS prereqs` step — that step reinstalled
+byte-identical packages on every run and, on a runner host with slow fsync, reached 16 minutes.
+
+| Image | For |
+|---|---|
+| `ghcr.io/aretecp/ci-elixir:1.18.4-otp-27` | Elixir 1.18 / OTP 27 apps (`areteos`) |
+| `ghcr.io/aretecp/ci-elixir:1.19.5-otp-28` | Elixir 1.19 / OTP 28 apps (`arilearn-phx`) |
+| `ghcr.io/aretecp/ci-python-uv:3.12` | uv-managed Python backends, incl. chromium (`areteos-py`) |
+| `ghcr.io/aretecp/ci-python:3.12` | Python backends that drive uv themselves (`beacon`) |
+| `ghcr.io/aretecp/ci-node:22` | Node 22 frontends (`areteos-py`) |
+| `ghcr.io/aretecp/ci-rust-tauri:1.97` | Tauri desktop workspace (`areteos/desktop`) |
+
+Public packages, so no `container.credentials` block is needed. Rebuilt on change and weekly for
+OS security patches. See [`images/README.md`](images/README.md) for contents, tag policy, and
+what must never be baked in.
 
 ## Usage
 

@@ -1,0 +1,135 @@
+name: CI base images
+
+# Builds and publishes the org's CI base images to GHCR.
+#
+# Why these exist: every consuming workflow used to open with an
+# `apt-get install` of the same packages on every run. On a runner host with
+# slow fsync that single step reached 16 minutes (dpkg fsyncs each unpacked
+# file); even on a fast host it is pure repeated work plus an apt mirror
+# dependency in the critical path of every PR. Baking the packages into an
+# image moves that cost to this workflow, which runs only when a Dockerfile
+# changes or on the weekly refresh.
+#
+# Scope rule: only toolchain and OS packages belong in these images. Anything
+# version-coupled to application source (node_modules, Playwright browsers,
+# mix deps) stays in the consuming workflow behind actions/cache, or the image
+# silently goes stale against the repo that depends on it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/**'
+      - '.github/workflows/ci-images.yml'
+  pull_request:
+    paths:
+      - 'images/**'
+      - '.github/workflows/ci-images.yml'
+  # Weekly rebuild so published images pick up Debian security updates even
+  # when no Dockerfile changed. Sunday 04:17 UTC — off-hours, off the hour.
+  schedule:
+    - cron: '17 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-images-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # images/manifest.json is the single source of truth for what gets built and
+  # under which name. Adding an image is a Dockerfile plus a manifest entry —
+  # no edit to this workflow.
+  discover:
+    name: Discover images
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read image manifest
+        id: read
+        run: |
+          echo "matrix=$(jq -c '{include: .}' images/manifest.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.image }}:${{ matrix.tag }}
+    needs: discover
+    runs-on: [self-hosted, omarchy]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+
+    env:
+      # The runner's HOME is read-only on this host, so both `docker login`
+      # (which writes a config) and `docker build` need the CLI config dir
+      # pointed somewhere writable. RUNNER_TEMP resolves under that same
+      # read-only root here, so use /tmp — the one location guaranteed
+      # writable and independent of both HOME and RUNNER_TEMP.
+      DOCKER_CONFIG: /tmp/docker-config-${{ github.run_id }}-${{ strategy.job-index }}
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Two tags per image:
+      #   <tag>                       moving; what consumers pin. Tracks OS
+      #                               patches for a fixed toolchain version.
+      #   <tag>-<yyyymmdd>-<sha7>     immutable; for bisecting a bad refresh
+      #                               or pinning strictly.
+      # This mirrors the repo's @v1 convention: the moving tag encodes the
+      # contract (toolchain version), not the build.
+      - name: Compute tags
+        id: tags
+        run: |
+          ref="${REGISTRY}/${{ matrix.image }}"
+          stamp="$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+          {
+            echo "moving=${ref}:${{ matrix.tag }}"
+            echo "pinned=${ref}:${{ matrix.tag }}-${stamp}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build --pull \
+            --tag '${{ steps.tags.outputs.moving }}' \
+            --tag '${{ steps.tags.outputs.pinned }}' \
+            'images/${{ matrix.dir }}'
+
+      # Prove the image can actually do the job before it is published. A
+      # missing package here is a red PR check instead of six repos failing
+      # their next run.
+      - name: Smoke test
+        run: |
+          docker run --rm '${{ steps.tags.outputs.moving }}' \
+            bash -euc "$(cat 'images/${{ matrix.dir }}/smoke.sh')"
+
+      # Pushes only from main / schedule / dispatch. PRs build and smoke-test
+      # so a broken Dockerfile cannot merge, but publish nothing.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push '${{ steps.tags.outputs.moving }}'
+          docker push '${{ steps.tags.outputs.pinned }}'
+
+      # Leave no credential file and no accumulating tags on the shared runner
+      # host. The layer cache survives (that is the point); only the named
+      # references are dropped.
+      - name: Clean up
+        if: always()
+        run: |
+          docker logout ghcr.io || true
+          rm -rf "${DOCKER_CONFIG}"
+          docker image rm \
+            '${{ steps.tags.outputs.pinned }}' \
+            '${{ steps.tags.outputs.moving }}' 2>/dev/null || true
