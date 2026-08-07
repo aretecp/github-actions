@@ -196,7 +196,52 @@ jobs:
           echo "::endgroup::"
 
           CANDIDATES=$(echo "$NON_MERGE" | grep -oE '#[0-9]+' | sort -t'#' -k2 -n -u | tr -d '#' || true)
-          echo "Candidates: $CANDIDATES"
+          echo "Candidates from commit messages: $CANDIDATES"
+
+          # ── Second source: `Closes #N` in the FEATURE PRs' descriptions ──────
+          #
+          # The scan above matches Areté's COMMIT convention (`feat: #42 ...`).
+          # It cannot see the other convention: GitHub's `Closes #N` in a pull
+          # request description. On a `develop` -> `main` flow GitHub never acts
+          # on those itself — closing keywords only fire when a PR merges into
+          # the DEFAULT branch — and the later promotion does not re-scan them,
+          # so those issues stay open indefinitely and get closed by hand.
+          #
+          # Measured on the aretecp/areteos 1557 promotion: the commit scan above
+          # yielded exactly one candidate, which was a PR and correctly dropped,
+          # leaving nothing — while PR #1544's body declared 13 issues and #1551
+          # declared a 14th.
+          #
+          # Feature PRs are read from the commit SUBJECTS rather than from
+          # `commits/{sha}/pulls`, which would cost one API request per commit
+          # (31 on that promotion, on every `synchronize` of the PR). Merge
+          # commits carry `Merge pull request #N`, squashes carry `(#N)`. Both
+          # approaches were compared on #1557 and returned an identical set.
+          # A rebase-merged PR leaves no reference in either place; the commit
+          # scan above is the only thing that can catch those.
+          SUBJECTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
+                       -q '.[].commit.message | split("\n")[0]')
+          FEATURE_PRS=$(echo "$SUBJECTS" \
+            | grep -oE 'Merge pull request #[0-9]+|\(#[0-9]+\)$' \
+            | grep -oE '[0-9]+' | sort -n -u || true)
+          echo "Feature PRs in this promotion: $(echo $FEATURE_PRS | tr '\n' ' ')"
+
+          # Fenced code blocks and blockquotes are stripped before matching: a PR
+          # that *documents* or quotes a `Closes` line — including this repo's own
+          # release template — must not have its example acted on. `\s+#` refuses
+          # `owner/repo#5`, which would otherwise resolve against THIS repo;
+          # cross-repo closes stay manual.
+          BODY_CANDIDATES=$(for P in $FEATURE_PRS; do
+              gh api "repos/${REPO}/pulls/${P}" --jq '.body // ""' 2>/dev/null \
+                | awk '/^[[:space:]]*```/ { f = !f; next } !f' \
+                | grep -v '^[[:space:]]*>' \
+                | grep -oP '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\K[0-9]+' || true
+            done | sort -n -u || true)
+          echo "Candidates from PR bodies: $(echo $BODY_CANDIDATES | tr '\n' ' ')"
+
+          CANDIDATES=$(printf '%s\n%s\n' "$CANDIDATES" "$BODY_CANDIDATES" \
+            | grep -v '^[[:space:]]*$' | sort -n -u || true)
+          echo "Candidates (union): $(echo $CANDIDATES | tr '\n' ' ')"
 
           # Validate each candidate is an actual issue (not a PR)
           : > /tmp/issues.txt
