@@ -285,11 +285,65 @@ on:
         type: boolean
         default: false
 
+      deploy-concurrency-group:
+        description: >-
+          Override the serialisation key for VPS operations. Defaults to
+          `vps-<vps-user>-<repo-dir>`, which serialises EVERY operation
+          targeting that directory — dev and prod, deploy and rollback and
+          copy-db — because they all `git checkout --force` in it. Set this only
+          with a specific reason; a value that differs per workflow re-opens the
+          race this exists to close. Must match across `deploy-vps-shared`,
+          `rollback-vps-shared` and `copy-prod-db-shared` for the same target.
+        required: false
+        type: string
+        default: ''
+
 jobs:
   deploy:
     name: Deploy to VPS (${{ inputs.environment }})
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+
+    # Serialise on the DEPLOY TARGET, not on the calling workflow.
+    #
+    # `vps-deploy-core` does `git checkout --force` in `repo-dir` and then
+    # `compose up` from that tree. Two runs against the same directory race, and
+    # the loser can build prod containers from the other one's source. The
+    # invariant is a property of the directory, so it belongs here — a caller
+    # that hand-writes its own group has to rediscover it, and they get it
+    # wrong: bd-pulse only serialises dev against prod because it was bitten
+    # (aretecp/bd-pulse#2299), and areteos still uses separate `deploy-dev` /
+    # `deploy-prod` groups against one shared `repo-dir`.
+    #
+    # Grouping here covers dev vs prod, deploy vs rollback vs copy-db, and any
+    # future caller, with no consumer change. Callers keep their own
+    # workflow-level `concurrency` for their own reasons; both apply.
+    #
+    # The VPS host is deliberately NOT in the key: it is resolved from Infisical
+    # at runtime, long after concurrency is evaluated. So two genuinely
+    # different hosts sharing a `repo-dir` path over-serialise. That is the safe
+    # direction to be wrong in, and it does not apply today — every Areté app
+    # runs dev and prod on one host out of one directory (see the
+    # `--remove-orphans` note in vps-deploy-core).
+    #
+    # `github.repository` (the CALLER's repo) leads the key as a blast-radius
+    # guard. Whether `inputs` resolves inside a called workflow's job-level
+    # `concurrency` is not something this repo has verified; if it ever came back
+    # empty, a key of `vps--` would serialise every deploy across all NINE repos
+    # that call this workflow — areteos, areteos-py, ari-command-center,
+    # ari-vendor-matching, bd-pulse, beacon, litellm-gateway, performance-review,
+    # watterson-vendor-matching. With the repo in front, that degrades to
+    # per-repo serialisation, which is still strictly better than today. It costs
+    # nothing when the inputs do resolve: different repos already use different
+    # `repo-dir` paths.
+    concurrency:
+      group: >-
+        ${{ inputs.deploy-concurrency-group != ''
+            && inputs.deploy-concurrency-group
+            || format('vps-{0}-{1}-{2}', github.repository, inputs.vps-user, inputs.repo-dir) }}
+      # Never cancel a deploy mid-recreate — queue behind it instead.
+      cancel-in-progress: false
+
     permissions:
       id-token: write
       contents: read
