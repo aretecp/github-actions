@@ -154,6 +154,16 @@ on:
         type: boolean
         default: true
 
+      compose-up-timeout:
+        description: >-
+          SSH command timeout for the compose-up step, as a Go duration
+          (e.g. `45m`). With `compose-build: true` this step builds on the VPS
+          and has to outlast a cold build, so the ssh-action's 10m default is
+          not enough once a dependency bump invalidates the cached layer.
+        required: false
+        type: string
+        default: 30m
+
       compose-force-recreate:
         description: >-
           `true` — pass `--force-recreate` to `compose up`. Default `false`.
@@ -471,6 +481,7 @@ jobs:
           allow-clone: 'false'
           compose-file: ${{ inputs.compose-file }}
           compose-build: ${{ inputs.compose-build }}
+          compose-up-timeout: ${{ inputs.compose-up-timeout }}
           compose-force-recreate: ${{ inputs.compose-force-recreate }}
           env-file-name: ${{ inputs.env-file-name }}
           healthcheck-containers: ${{ inputs.healthcheck-containers }}

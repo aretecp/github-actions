@@ -81,6 +81,17 @@ inputs:
     required: false
     default: 'true'
 
+  compose-up-timeout:
+    description: >-
+      SSH command timeout for the compose-up step, as a Go duration (e.g. 30m).
+      When compose-build is true this step builds the image on the VPS, so it
+      must outlast a COLD build: a dependency bump invalidates the cached
+      dependency layer and the whole tree recompiles. The ssh-action default of
+      10m is comfortably enough for a warm build and not enough for a cold one,
+      which fails the deploy mid-build with "Run Command Timeout".
+    required: false
+    default: 30m
+
   env-file-name:
     description: Filename for the rendered env file on the VPS, relative to repo-dir.
     required: false
@@ -563,6 +574,7 @@ runs:
         username: ${{ inputs.vps-user }}
         key: ${{ env.VPS_SSH_KEY }}
         envs: REPO_DIR,COMPOSE_FILE,ENV_FILE_NAME,COMPOSE_BUILD,COMPOSE_FORCE_RECREATE
+        command_timeout: ${{ inputs.compose-up-timeout }}
         script: |
           set -euo pipefail
           cd "$REPO_DIR"
