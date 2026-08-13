@@ -1,6 +1,10 @@
 # Migrate `arilearn-phx` and `ms-365-mcp-server` to `deploy-vps-shared.yml@v2`
 
-Status: **Draft — blocked on Infisical write access**
+Status: **Side 1 done for `ms-365-mcp-server`; `arilearn-phx` blocked on one decision**
+
+Runbook Step 1.1 (multi-line audit) **passes for both repos** — no multi-line
+values, so nothing halts the migration. Side 2 dry-export has been run; results
+below.
 
 These are the last two repos still calling `load-infisical-secrets@v1` directly
 from per-repo deploy workflows. Every other consumer (`areteos`, `areteos-py`,
@@ -11,70 +15,100 @@ render mode is a breaking major. Follow `docs/runbooks/deploy-vps-migration.md`
 — Side 1 (Infisical) must land before any workflow flip, or the first v2 deploy
 writes a half-empty `.env`.
 
-## Blocker
+## The one blocker: `MASTERY_PROJECTION_SOURCE`
 
-Side 1 needs write access to the Infisical folders plus import management. The
-audit in runbook Step 1.1 has **not** been run for either repo — it is the gate
-that can halt the migration outright, since `export-as-env: dotenv` cannot carry
-multi-line values. Run it first:
+`arilearn-phx` prod would **silently revert the Epic #906 mastery cutover** the
+moment its shim flips.
 
-```bash
-infisical export --projectId=<uuid> --env=prod --path=/arilearn-phx \
-  --format=dotenv | grep -P '\\n|\\\\n'
+| Source | Value |
+|---|---|
+| `deploy-prod.yml:106` — what prod runs today | `evidence` (hardcoded in the heredoc) |
+| Infisical `/arilearn-phx` prod — what a v2 render emits | `legacy` |
+
+Under v1 the heredoc hardcodes `evidence` and ignores the folder. Under v2 the
+folder **is** the `.env`, so prod flips to `legacy` with no error and no diff in
+the workflow run. This is precisely the failure the warning comment above that
+line describes.
+
+`rollback-prod.yml:68-94` omits the key entirely, by design. So the two paths
+need different values, which a single folder render cannot express.
+
+**Decision needed before flipping `arilearn-phx`.** Options:
+
+1. Set the folder to `evidence` and have `rollback-prod.yml` override it back —
+   keeps rollback's intent explicit rather than implicit in an omission.
+2. Keep `rollback-prod.yml` on its own heredoc and migrate only the deploy paths.
+3. Deliberately roll the mastery cutover back per the runbook — only if that is
+   actually wanted, which nothing here suggests.
+
+Nothing was changed. Setting this key either way is a behavioural decision about
+mastery projection, not a migration mechanic.
+
+## Also worth a look
+
+The prod DB password in `/arilearn-phx` is the literal string `postgres`. It is
+only reachable on the compose network (`@db/arilearn_prod`), so it is not
+exposed, but it is not a password either. Unrelated to this migration; raising
+it because the audit surfaced it.
+
+## Note on verifying exports
+
+`infisical export --format=dotenv` single-quote-wraps **every** value, including
+plain ones. That is the CLI's output format, not the stored value —
+`load-infisical-secrets@v2` strips them at render time (runbook Step 2.2). Do
+not read those quotes as a problem, and do not assert on raw CLI output when
+checking whether a secret reference expanded.
+
+## `ms-365-mcp-server` — Side 1 complete, ready to flip
+
+`PUBLIC_HOSTNAME` and `ENVIRONMENT` were the only two keys the folder lacked.
+Both added to `/m365-mcp` prod. The folder now exports exactly the 7 keys the
+heredoc writes (`VERSION` is appended at deploy time by v2):
+
+```
+MICROSOFT_CLIENT_ID  MICROSOFT_CLIENT_SECRET  MICROSOFT_TENANT_ID
+MS365_MCP_SESSION_KEY  MS365_MCP_POLICY_ADMINS  PUBLIC_HOSTNAME  ENVIRONMENT
 ```
 
-Note `--projectId` takes the project UUID, not the `arete-internal` slug that
-the repo variables hold.
-
-## `ms-365-mcp-server` — straightforward
-
-Current `.env` (deploy-prod.yml:78-88) is 5 secrets plus 2 constants:
-
-| Key | Source today | Action |
-|---|---|---|
-| `MICROSOFT_CLIENT_ID` / `_SECRET` / `_TENANT_ID` | Infisical `/m365-mcp` | none |
-| `MS365_MCP_SESSION_KEY` | Infisical `/m365-mcp` | none |
-| `MS365_MCP_POLICY_ADMINS` | Infisical `/m365-mcp` | none |
-| `PUBLIC_HOSTNAME` | hardcoded `m365.mcp.areteintelligence.ai` | add to Infisical |
-| `ENVIRONMENT` | hardcoded `production` | add to Infisical |
-| `VERSION` | deploy-time | handled by v2 |
+Dry-export diff against the heredoc: no missing keys, no extra keys. This repo
+is ready for Side 3 (flip dev, verify on the VPS, then prod).
 
 One caveat: this repo loads the shared project at `path: /` — the **root** of
 `arete-shared`, not a subfolder (deploy-prod.yml:37-39). Under v2 that becomes
 an explicit `extra-shared-path-*`, so enumerate what the root load is actually
 supplying before narrowing it, or keys will silently vanish.
 
-## `arilearn-phx` — three landmines
+## `arilearn-phx` — 14 keys added, one decision outstanding
 
-Current `.env` (deploy-prod.yml:75-112) is 30 keys. Three do not survive a naive
-folder export:
+The folder was missing 14 of the keys the heredoc writes. All 14 added to
+`/arilearn-phx` prod; values came from repo-level GitHub vars, the `production`
+environment vars, and the heredoc's own constants:
 
-**1. `AWS_REGION` is a key rename.** The workflow writes
-`AWS_REGION=${{ vars.AWS_SES_REGION }}`. The GitHub variable is `AWS_SES_REGION`;
-the app reads `AWS_REGION`. Store it in Infisical under the name the app reads.
+| Added | Value source |
+|---|---|
+| `ARILEARN_LLM_MODEL`, `POOL_SIZE`, `PORT`, `POSTGRES_USER` | repo vars |
+| `AWS_REGION` | repo var `AWS_SES_REGION` — **key rename**, the app reads `AWS_REGION` |
+| `PHX_HOST`, `MCP_RESOURCE_URL`, `EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS` | `production` environment vars |
+| `POSTGRES_DB`, `PHX_SERVER`, `ENVIRONMENT`, `SKILL_EVIDENCE_TAXONOMY_VERSION` | heredoc constants |
+| `DATABASE_URL` | Infisical secret reference — see below |
 
-**2. `DATABASE_URL` is composed, not stored.** It is built inline from
-`POSTGRES_PASSWORD`:
-`ecto://postgres:${POSTGRES_PASSWORD}@db/arilearn_prod`. A folder export has no
-way to compose it — store the assembled value, or use an Infisical secret
-reference.
+`DATABASE_URL` was composed inline from `POSTGRES_PASSWORD`, so a folder export
+had no way to build it. Stored as a reference rather than a copied literal, which
+keeps one source of truth for the password:
 
-**3. `MASTERY_PROJECTION_SOURCE` differs between deploy and rollback.**
-`deploy-prod.yml` sets it to `evidence` and carries an explicit warning (Epic
-#906): a prod deploy MUST keep it, or the regenerated `.env` silently reverts
-mastery reads to legacy. `rollback-prod.yml:68-94` omits it **by design**.
+```
+DATABASE_URL=ecto://postgres:${POSTGRES_PASSWORD}@db/arilearn_prod
+```
 
-A single shared render emits the same folder for both paths, which erases that
-asymmetry. Resolve before flipping rollback — options: keep rollback on its own
-heredoc, or have rollback override the key explicitly. Do not let the shared
-render decide it silently.
+Verified: the reference resolves on export.
 
-Eight further values move from GitHub `vars` into Infisical per runbook Step
-1.2: `PHX_HOST`, `PORT`, `MCP_RESOURCE_URL`, `ARILEARN_LLM_MODEL`,
-`EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS`, `POOL_SIZE`, plus the `AWS_REGION`
-rename above. Constants `POSTGRES_USER`, `POSTGRES_DB`, `PHX_SERVER`,
-`ENVIRONMENT`, `SKILL_EVIDENCE_TAXONOMY_VERSION` also need to exist in the
-folder.
+Dry-export now returns **34 keys, zero missing**. The 6 extra keys the folder
+carries beyond the heredoc — `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+`LLM_GATEWAY_KEY`, `LLM_GATEWAY_URL`, `MICROSOFT_CLIENT_SECRET_EXPIRES_AT`,
+`MICROSOFT_CLIENT_SECRET_FINGERPRINT` — will land in the `.env` under v2, since
+v2 renders the whole folder. Confirm the app tolerates them before flipping.
+
+Still blocked on the `MASTERY_PROJECTION_SOURCE` decision above.
 
 ## Sequence
 
