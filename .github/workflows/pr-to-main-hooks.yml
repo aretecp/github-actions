@@ -7,7 +7,12 @@ name: PR to main — hooks (shared)
 #   4. Post a Teams card with the latest body (opened / ready_for_review only)
 #
 # Each consumer's `.github/workflows/pr-to-main-hooks.yml` becomes a thin
-# shim that calls this with `uses: aretecp/github-actions/.github/workflows/pr-to-main-hooks.yml@v1`.
+# shim that calls this with `uses: aretecp/github-actions/.github/workflows/pr-to-main-hooks.yml@v2`.
+#
+# `@v2`, not `@v1`. This workflow was added in #70, which is v2-era — the `v1`
+# moving tag predates the file, so an `@v1` shim resolves to a ref that does not
+# contain it. The frozen-`@v1` policy in README applies to
+# `load-infisical-secrets` only, not to reusable workflows.
 #
 # Reviewers are NOT auto-assigned — the PR author requests reviews
 # manually so we can match the right person to the change.
@@ -287,19 +292,53 @@ jobs:
           ISSUES=$(cat /tmp/issue-context.txt)
 
           cat > /tmp/summary-prompt.txt << 'PROMPTEOF'
-          You are writing a PR description for a pull request to main.
+          You are writing a PR description for a release PR into main.
 
-          Write a concise, high-level summary of the changes in this PR. Focus on:
-          - What changed and why (intent, not line-by-line)
-          - Key decisions or tradeoffs visible in the diff
-          - Any breaking changes or things reviewers should pay attention to
+          Output exactly this shape:
 
-          Format as markdown with a ## Summary heading and short bullet points.
-          Keep it to 3-8 bullets. No filler. No "this PR does...". Just the facts.
-          Each bullet should reference the issue number(s) it relates to in parentheses, e.g. "(#42)".
+          ## Summary
 
+          - <bullet> (#42)
+          - <bullet> (#43)
+
+          ## Review notes
+
+          - <thing a reviewer must look at>
+
+          HARD RULES ON BULLETS — these matter more than completeness:
+          - Maximum 20 words per bullet. Count them. A bullet over 20 words is wrong
+            even if everything in it is true.
+          - ONE clause. State what changed. Then stop.
+          - BANNED: trailing justification clauses. No bullet may contain " — which ",
+            " — resolving ", " so that ", " thereby ", " allowing ", " ensuring ".
+            If you catch yourself writing one, the material after it either belongs
+            in its own bullet or does not belong at all.
+          - Start with a verb: Adds / Fixes / Removes / Renames / Reverts.
+          - End with the issue number(s) in parentheses, e.g. "(#42)".
+
+          ## Summary: at most 8 bullets, what changed. Not why it is good, not how
+          it works internally. If more than 8 things changed, cover the 8 that most
+          affect someone deploying this, and add a final bullet "- Plus N smaller
+          changes (see commits)".
+
+          ## Review notes: at most 3 bullets — breaking changes, migrations, config
+          or secret changes, anything risky. OMIT THE ENTIRE HEADING if there is
+          nothing. Never write "None" or "N/A".
+
+          Bad (43 words, three clauses, two banned phrases):
+          - Adds CompanyKindGate, a disambiguation step inside CreateInstitutionMini
+            that clarifies institution vs. client before any create/request flow —
+            writers see "Request institution" while app-admins see "Create
+            institution", resolving the confusion that caused contacts to dead-end (#2665)
+
+          Good:
+          - Adds an institution-vs-client gate to CreateInstitutionMini (#2665)
+          - Writers now see "Request institution"; app-admins see "Create institution" (#2665)
+
+          No preamble, no self-assessment ("successfully", "comprehensive", "robust"),
+          no "This PR does...".
           Do NOT include closing keywords (Closes, Fixes, etc.) — those are added separately.
-          Output ONLY the markdown summary, nothing else.
+          Output ONLY the markdown, nothing else.
           PROMPTEOF
 
           cat >> /tmp/summary-prompt.txt << EOF
@@ -433,11 +472,15 @@ jobs:
           # one — the markers are <!-- auto-summary --> ... <!-- /auto-summary -->.
           # Falls back to the raw body if no marker present (PR opened
           # before the AI step ran on this exact event).
+          # `## Summary` is dropped (the card's own title already says what this
+          # is); any other h2 — `## Review notes` — becomes bold, because Teams
+          # MessageCard does not render `##` and would print the hashes raw.
           if printf '%s' "$BODY" | grep -q '<!-- auto-summary -->'; then
             DESC=$(printf '%s' "$BODY" \
               | sed -n '/<!-- auto-summary -->/,/<!-- \/auto-summary -->/p' \
               | sed '1d;$d' \
-              | sed 's/^## *Summary[[:space:]]*$//')
+              | sed 's/^## *Summary[[:space:]]*$//' \
+              | sed -E 's/^## +(.+[^[:space:]])[[:space:]]*$/**\1**/')
           else
             # Strip Closes / Fixes / Resolves lines so they don't show up
             # twice (once here, once in the Closes facts row).
