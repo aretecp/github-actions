@@ -7,7 +7,12 @@ name: PR to main — hooks (shared)
 #   4. Post a Teams card with the latest body (opened / ready_for_review only)
 #
 # Each consumer's `.github/workflows/pr-to-main-hooks.yml` becomes a thin
-# shim that calls this with `uses: aretecp/github-actions/.github/workflows/pr-to-main-hooks.yml@v1`.
+# shim that calls this with `uses: aretecp/github-actions/.github/workflows/pr-to-main-hooks.yml@v2`.
+#
+# `@v2`, not `@v1`. This workflow was added in #70, which is v2-era — the `v1`
+# moving tag predates the file, so an `@v1` shim resolves to a ref that does not
+# contain it. The frozen-`@v1` policy in README applies to
+# `load-infisical-secrets` only, not to reusable workflows.
 #
 # Reviewers are NOT auto-assigned — the PR author requests reviews
 # manually so we can match the right person to the change.
