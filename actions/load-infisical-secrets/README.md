@@ -28,11 +28,11 @@ Project slugs are stable, public identifiers — store as variables, not secrets
 
 | Variable | Value | Use in workflows |
 |---|---|---|
-| `INFISICAL_INTERNAL_PROJECT_SLUG` | `arete-internal` | `${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}` |
-| `INFISICAL_EXTERNAL_PROJECT_SLUG` | `arete-external` | `${{ vars.INFISICAL_EXTERNAL_PROJECT_SLUG }}` |
-| `INFISICAL_SHARED_PROJECT_SLUG` | `arete-shared` | `${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}` |
+| `INFISICAL_INTERNAL_PROJECT_SLUG` | `lumist-labs-internal` | `${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}` |
+| `INFISICAL_EXTERNAL_PROJECT_SLUG` | `lumist-labs-external` | `${{ vars.INFISICAL_EXTERNAL_PROJECT_SLUG }}` |
+| `INFISICAL_SHARED_PROJECT_SLUG` | `lumist-labs-shared` | `${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}` |
 
-Workflows can also pass the slug as a literal (`project-slug: arete-internal`) — variables are an ergonomic convention, not a requirement.
+Workflows can also pass the slug as a literal (`project-slug: lumist-labs-internal`) — variables are an ergonomic convention, not a requirement.
 
 ### Already set in `aretecp` org
 
@@ -96,14 +96,14 @@ project-slug: ${{ vars.INFISICAL_EXTERNAL_PROJECT_SLUG }}
 project-slug: ${{ vars.INFISICAL_SHARED_PROJECT_SLUG }}
 
 # Or literal, no variable indirection
-project-slug: arete-internal
+project-slug: lumist-labs-internal
 ```
 
 ### Layering multiple loads (shared + project-specific)
 
-A workflow that loads from both a shared project (`arete-shared`) **and** a project-specific project (`arete-internal`, `arete-external`, ...) writes to the same `$GITHUB_ENV`. The action exports each resolved secret with `core.exportVariable`, so **the last load to write a given key wins**.
+A workflow that loads from both a shared project (`lumist-labs-shared`) **and** a project-specific project (`lumist-labs-internal`, `lumist-labs-external`, ...) writes to the same `$GITHUB_ENV`. The action exports each resolved secret with `core.exportVariable`, so **the last load to write a given key wins**.
 
-If `arete-shared` is loaded **recursively** at `/`, its subfolders may contain keys with the same name as project-specific keys (e.g. `arete-shared/terraform/entra/MICROSOFT_CLIENT_ID` vs `arete-internal/<your-app>/MICROSOFT_CLIENT_ID`). To avoid a shared-infra key silently shadowing your project's value, **load the shared project first and the project-specific project second**:
+If `lumist-labs-shared` is loaded **recursively** at `/`, its subfolders may contain keys with the same name as project-specific keys (e.g. `lumist-labs-shared/terraform/entra/MICROSOFT_CLIENT_ID` vs `lumist-labs-internal/<your-app>/MICROSOFT_CLIENT_ID`). To avoid a shared-infra key silently shadowing your project's value, **load the shared project first and the project-specific project second**:
 
 ```yaml
 steps:
@@ -182,7 +182,7 @@ Note: see [Limitations](#limitations) — multi-line secrets (PEM keys) are not 
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `project-slug` | yes | — | Infisical project slug (e.g. `arete-internal`). **Not** the project UUID. |
+| `project-slug` | yes | — | Infisical project slug (e.g. `lumist-labs-internal`). **Not** the project UUID. |
 | `environment` | yes | — | Infisical env slug (`prod`, `staging`, `dev`, ...) |
 | `path` | no | `/` | Folder path within the project |
 | `method` | no | `universal` | Auth method: `universal` or `oidc`. `oidc` requires `permissions: id-token: write` on the calling job |

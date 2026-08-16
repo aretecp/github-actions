@@ -31,8 +31,8 @@ name: PR to main — hooks (shared)
 #      `vars.INFISICAL_SHARED_PROJECT_SLUG` from the CALLER's own repo
 #      variables (unlike secrets, vars resolve against the caller —
 #      verified 2026-07-28, beacon run 30369406219), then loads
-#      ANTHROPIC_API_KEY from `arete-internal/prod/github-actions` and
-#      TEAMS_PR_NOTIFY_WEBHOOK_URL from `arete-shared/prod/teams/pr-notify`.
+#      ANTHROPIC_API_KEY from `lumist-labs-internal/prod/github-actions` and
+#      TEAMS_PR_NOTIFY_WEBHOOK_URL from `lumist-labs-shared/prod/teams/pr-notify`.
 #
 #      ANTHROPIC_API_KEY comes from the shared CI folder, NOT the app's own
 #      folder. Apps keep their key for app-runtime use; CI has its own so

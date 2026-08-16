@@ -40,7 +40,7 @@ Not `workflow_call` targets — these run in this repo on a cron. See
 `claude-issue-triage.yml@v2` needs **no `with:` block**. It reads the caller's own
 `vars.INFISICAL_OIDC_IDENTITY_ID` / `vars.INFISICAL_INTERNAL_PROJECT_SLUG` (unlike secrets, org
 variables resolve against the caller), loads `ANTHROPIC_API_KEY` from the shared CI folder
-`arete-internal/prod/github-actions`, and checks out the consumer's own default branch:
+`lumist-labs-internal/prod/github-actions`, and checks out the consumer's own default branch:
 
 ```yaml
 name: Claude Issue Triage
