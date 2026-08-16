@@ -43,9 +43,9 @@ VAR_NAMES=(
   INFISICAL_SHARED_PROJECT_SLUG
 )
 VAR_VALUES=(
-  arete-internal
-  arete-external
-  arete-shared
+  lumist-labs-internal
+  lumist-labs-external
+  lumist-labs-shared
 )
 
 # --- Prompt for values ---

@@ -16,7 +16,7 @@ name: Claude Issue Triage (shared)
 #      `vars.INFISICAL_INTERNAL_PROJECT_SLUG` from the CALLER's own org/repo
 #      variables (unlike secrets, vars resolve against the caller — verified
 #      2026-07-28, beacon run 30369406219), then loads ANTHROPIC_API_KEY from
-#      `arete-internal/prod/github-actions` via a short-lived GitHub OIDC
+#      `lumist-labs-internal/prod/github-actions` via a short-lived GitHub OIDC
 #      token at run time.
 #
 #      That folder is the shared CI key location — deliberately NOT any app's
@@ -184,7 +184,7 @@ jobs:
           elif [ -n "$FORWARDED_KEY" ]; then
             echo "ANTHROPIC_API_KEY resolved via forwarded secret (legacy path)."
           else
-            echo "::error::No ANTHROPIC_API_KEY available. For the OIDC path this repo needs: (1) the org variable INFISICAL_OIDC_IDENTITY_ID visible to it — check the 'selected repositories' list, (2) the OIDC identity trusted for this repo, and (3) read access on arete-internal/<env>/github-actions. Otherwise forward ANTHROPIC_API_KEY via the caller's secrets block."
+            echo "::error::No ANTHROPIC_API_KEY available. For the OIDC path this repo needs: (1) the org variable INFISICAL_OIDC_IDENTITY_ID visible to it — check the 'selected repositories' list, (2) the OIDC identity trusted for this repo, and (3) read access on lumist-labs-internal/<env>/github-actions. Otherwise forward ANTHROPIC_API_KEY via the caller's secrets block."
             exit 1
           fi
 

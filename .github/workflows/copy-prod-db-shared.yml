@@ -64,7 +64,7 @@ on:
       shared-project-slug:
         description: >-
           Infisical project slug holding the infra/Tailscale credentials
-          (e.g. `arete-shared`). Only the infra folder is loaded — no app
+          (e.g. `lumist-labs-shared`). Only the infra folder is loaded — no app
           secrets, no .env render.
         required: true
         type: string

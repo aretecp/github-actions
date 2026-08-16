@@ -91,7 +91,7 @@ credential that died was hand-made in the portal.
 
 ## Teams notifications
 
-Posts to the existing PR-notify channel (`arete-shared/prod/teams/pr-notify`) via
+Posts to the existing PR-notify channel (`lumist-labs-shared/prod/teams/pr-notify`) via
 [`actions/teams-notify`](../../actions/teams-notify). Reusing the channel the team
 already watches is the point — a GitHub issue nobody has open is not a notification.
 

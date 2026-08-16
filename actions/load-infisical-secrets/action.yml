@@ -11,7 +11,7 @@ description: >-
 inputs:
   project-slug:
     description: >-
-      Infisical project slug (e.g. `arete-platform`). NOT the project UUID.
+      Infisical project slug (e.g. `lumist-labs-internal`). NOT the project UUID.
       Find it in the Infisical UI under Project Settings.
     required: true
 

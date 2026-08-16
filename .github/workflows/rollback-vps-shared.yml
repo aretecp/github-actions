@@ -72,14 +72,14 @@ on:
       shared-project-slug:
         description: >-
           Infisical project slug holding the infra/deploy folder
-          (e.g. `arete-shared`).
+          (e.g. `lumist-labs-shared`).
         required: true
         type: string
 
       app-project-slug:
         description: >-
           Infisical project slug holding the app-specific secrets folder
-          (e.g. `arete-internal`).
+          (e.g. `lumist-labs-internal`).
         required: true
         type: string
 
