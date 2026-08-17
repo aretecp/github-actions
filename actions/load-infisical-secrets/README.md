@@ -194,7 +194,7 @@ Note: see [Limitations](#limitations) — multi-line secrets (PEM keys) are not 
 | `dotenv-output-path` | no | `$RUNNER_TEMP/infisical.env` | Path where the rendered dotenv file is written. Only used when `export-as-env: dotenv`. Exposed as output `dotenv-file-path` |
 | `recursive` | no | `'false'` | `'true'` fetches secrets at the given path AND all subpaths |
 | `include-imports` | no | `'true'` | `'true'` follows Infisical env-import links (e.g. `prod` env importing from a `shared` project) |
-| `domain` | no | `https://secrets.areteintelligence.ai` | Infisical instance URL. Override to target Infisical Cloud (`https://app.infisical.com`) or another instance |
+| `domain` | no | `https://secrets.lumistlabs.ai` | Infisical instance URL. Override to target Infisical Cloud (`https://app.infisical.com`) or another instance |
 
 ¹ Required at runtime depending on `method`; not enforced at action-load time.
 
