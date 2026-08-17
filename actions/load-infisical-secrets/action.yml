@@ -98,11 +98,12 @@ inputs:
 
   domain:
     description: >-
-      Infisical instance URL. Defaults to Areté's self-hosted instance. Override
-      to target Infisical Cloud (`https://app.infisical.com`) or another
-      instance.
+      Infisical instance URL. Defaults to Areté's self-hosted instance at
+      `secrets.lumistlabs.ai`. The legacy `secrets.areteintelligence.ai` still
+      reaches the same box, so pinned older tags keep working. Override to
+      target Infisical Cloud (`https://app.infisical.com`) or another instance.
     required: false
-    default: https://secrets.areteintelligence.ai
+    default: https://secrets.lumistlabs.ai
 
 outputs:
   secrets:

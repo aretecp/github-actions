@@ -80,6 +80,21 @@ Bump rules:
 | New optional input, new output, additional behavior behind a flag | minor |
 | Renamed/removed input or output, default change, behavior change that affects existing callers | **major** — bump the moving tag too |
 
+**Exception — a default that changes *where* we point, not *what* callers get.**
+A default change is normally major. But this repo's reusable workflows and
+composites reference each other by the **moving** `@vN` tag, and none of them
+expose the underlying input as a passthrough. So a major bump does not let
+consumers opt in gradually — it strands them on the old value until every
+internal ref *and* every consumer pin is retagged, and any pin missed stays
+silently on the old value.
+
+When the new default is observably equivalent to the old — same service, same
+data, same auth, verified before the change — prefer a patch and let the moving
+tag carry it. Record the equivalence check in the PR. Applied 2026-08-17 for the
+Infisical `domain` default (`secrets.areteintelligence.ai` →
+`secrets.lumistlabs.ai`: one instance, both hostnames served, both certs valid).
+This is not licence to ship behaviour changes as patches.
+
 **Never amend a published tag.** If you need to fix a release, cut a new patch and update the moving major tag to point at it.
 
 When you bump major, the old `vN` tag stays where it is — it does not advance. Consumers on `@v1` keep getting `1.x.y`; only repos that explicitly retarget to `@v2` get the new behavior.
