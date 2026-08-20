@@ -38,7 +38,15 @@ if [[ $# -eq 0 ]]; then
   exit 2
 fi
 
-CONTAINERS=("$@")
+# Re-split on whitespace regardless of how the caller's shell expanded the
+# list. vps-deploy-core invokes this as `bash -s -- $HEALTHCHECK_CONTAINERS`
+# from an ssh-action script that runs in the TARGET USER'S LOGIN SHELL: bash
+# word-splits that unquoted expansion into N args, but zsh passes ONE arg
+# containing spaces ("app db" -> docker inspect "app db" -> "not found"
+# forever -> guaranteed 150s timeout). Seen live on ssdnode2 (zsh login
+# shell), run 32399773948. Container names cannot contain whitespace, so
+# re-splitting inside this script (always bash) is safe on both.
+read -ra CONTAINERS <<< "$*"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-150}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 COMPOSE_FILE="${COMPOSE_FILE:-}"
