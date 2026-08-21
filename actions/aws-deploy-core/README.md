@@ -92,6 +92,22 @@ script writes it under `umask 077`.
 Not string-interpolated. A quote or newline in any input cannot break out of the
 parameters document.
 
+### Multiple compose files, and why LumiOS needs them
+
+`compose-file` takes a space-separated list, one `-f` each in precedence order.
+That exists because removing a service's dependency in Compose turns out to have
+exactly one working mechanism, and it took measuring to find:
+
+| Attempt | Result |
+|---|---|
+| `extends` in a second file | **fails.** `depends_on` is inherited, then errors as `depends on undefined service "db"` |
+| `depends_on: []` in an override | **ignored.** The merge keeps the base's `depends_on` |
+| `docker compose up --no-deps` | works, but drops *every* dependency — including the worker's migration-ordering gate on `app` |
+| `depends_on: {db: !reset null}` in an override | **works.** Clears just that one key |
+
+Paired with `profiles: ["local-db"]` on `db` in the same override, a plain `up`
+then starts everything except the bundled database. Measured on Compose 5.0.2.
+
 ### Polling is manual, on `command-timeout`
 
 `aws ssm wait command-executed` gives up after roughly 100 seconds, which a cold
@@ -132,7 +148,8 @@ mutated. The alternative — repository variables with hardcoded fallbacks, as
 | `env-parameter-name` | ec2-compose | — | SecureString holding the dotenv |
 | `env-file-path` | no | — | local dotenv to upload to that parameter |
 | `env-file-name` | no | `.env` | filename on the host |
-| `compose-file` | no | `docker-compose.yml` | relative to `repo-dir` |
+| `compose-file` | no | `docker-compose.yml` | space-separated for an override stack |
+| `compose-profiles` | no | — | space-separated `--profile` values |
 | `healthcheck-url` | no | — | curled on the host after `compose up` |
 | `command-timeout` | no | `1800` | seconds; a cold build outlasts less |
 
