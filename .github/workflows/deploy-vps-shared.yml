@@ -35,6 +35,11 @@ name: Deploy to VPS (shared)
 #   permissions:
 #     id-token: write
 #     contents: read
+#
+# `contents: read` now does double duty: the job token it produces is what the
+# VPS uses to fetch a PRIVATE repo over https, so a host needs no git credential
+# placed on it by hand. See `github-token` in actions/vps-deploy-core. A box on a
+# git@ remote keeps using its own SSH key and is unaffected.
 
 on:
   workflow_call:
@@ -362,7 +367,20 @@ jobs:
 
     steps:
       - name: Deploy via vps-deploy-core
-        uses: aretecp/github-actions/actions/vps-deploy-core@v2
+        # ⚠ REVERT TO @v2 BEFORE MERGING ⚠
+        #
+        # Pinned to this branch ONLY so the change can be validated. A consumer
+        # pinning the WORKFLOW to a branch does not exercise a changed action,
+        # because this line resolves independently — the first validation attempt
+        # ran released `@v2` and produced a byte-identical failure, which is how
+        # that was discovered.
+        #
+        # It cannot be made an input: GitHub does not allow expressions in `uses:`.
+        # Nor can it be `./actions/vps-deploy-core` — inside a REUSABLE workflow a
+        # relative `uses:` resolves against the CALLER's checkout, which has no such
+        # path. So editing this line is the only way to validate a branch, and
+        # remembering to revert it is a real hazard worth a follow-up issue.
+        uses: aretecp/github-actions/actions/vps-deploy-core@feat/vps-git-auth-via-job-token
         with:
           infisical-identity-id: ${{ inputs.infisical-identity-id }}
           shared-project-slug: ${{ inputs.shared-project-slug }}
