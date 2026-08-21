@@ -35,6 +35,11 @@ name: Deploy to VPS (shared)
 #   permissions:
 #     id-token: write
 #     contents: read
+#
+# `contents: read` now does double duty: the job token it produces is what the
+# VPS uses to fetch a PRIVATE repo over https, so a host needs no git credential
+# placed on it by hand. See `github-token` in actions/vps-deploy-core. A box on a
+# git@ remote keeps using its own SSH key and is unaffected.
 
 on:
   workflow_call:

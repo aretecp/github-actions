@@ -109,6 +109,20 @@ inputs:
     required: false
     default: 'false'
 
+  github-token:
+    description: >-
+      Token the VPS uses to fetch a PRIVATE repo over HTTPS. Defaults to the
+      calling job's own token, so a caller that already declares
+      `permissions: contents: read` needs to pass nothing.
+
+      Only used for an https:// remote. A box on a git@ remote authenticates with
+      its own SSH key exactly as before and never sees this — see the checkout
+      step for why that is inert rather than merely unused.
+
+      Pass '' to opt out entirely and keep whatever credential the box already has.
+    required: false
+    default: ${{ github.token }}
+
   healthcheck-containers:
     description: >-
       Space-separated list of Docker container names to pass to
@@ -364,13 +378,50 @@ runs:
         REPO_URL: ${{ inputs.repo-url }}
         REF: ${{ inputs.ref }}
         ALLOW_CLONE: ${{ inputs.allow-clone }}
+        GH_TOKEN: ${{ inputs.github-token }}
       with:
         host: ${{ env.VPS_TAILSCALE_IP }}
         username: ${{ inputs.vps-user }}
         key: ${{ env.VPS_SSH_KEY }}
-        envs: REPO_DIR,REPO_URL,REF,ALLOW_CLONE
+        envs: REPO_DIR,REPO_URL,REF,ALLOW_CLONE,GH_TOKEN
         script: |
           set -euo pipefail
+
+          # Let the box authenticate an https:// remote with the JOB's token
+          # instead of a credential someone placed there by hand.
+          #
+          # The failure this removes: a host provisioned without a git credential
+          # deploys fine until the first fetch, then dies with
+          # "Authentication failed for https://github.com/<org>/<repo>.git" — which
+          # names no credential and no fix. LumiOS hit it the day it moved to a new
+          # VPS, because a first clone uses `repo-url` (https://) while the older
+          # boxes' remotes had been switched to git@ BY HAND, years ago, with
+          # nothing recording it. Every repo here is one re-clone from the same
+          # failure.
+          #
+          # Three properties make this safe to turn on for everyone at once:
+          #
+          # 1. INERT ON SSH. `credential.helper` is consulted by git's HTTP
+          #    transport only. A box on a git@ remote never invokes it, so the
+          #    hosts that work today are byte-for-byte unaffected.
+          # 2. NOTHING PERSISTS. Passed through GIT_CONFIG_* env vars, so the token
+          #    is not written to .git/config and cannot outlive the SSH session —
+          #    unlike `git config credential.helper store`, which leaves it on disk
+          #    if the job dies midway.
+          # 3. NOT ON A COMMAND LINE. The helper is a shell snippet that reads
+          #    $GH_TOKEN at exec time, so the token never appears in `ps` output.
+          #    (`git -c http.extraheader=...` would put it there.)
+          #
+          # Empty token → no config at all, so behaviour is identical to before
+          # for any caller that opts out.
+          if [[ -n "${GH_TOKEN:-}" ]]; then
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0="credential.helper"
+            # `if`, not `&&`: a helper is also called with store/erase, and the
+            # && form would exit non-zero on those. It answers `get` only, so a
+            # token is never handed to git for a write it does not need.
+            export GIT_CONFIG_VALUE_0='!f() { if test "$1" = get; then printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; fi; }; f'
+          fi
 
           if [[ ! -d "$REPO_DIR/.git" ]]; then
             if [[ "$ALLOW_CLONE" != "true" ]]; then
