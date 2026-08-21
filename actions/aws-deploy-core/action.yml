@@ -69,9 +69,17 @@ inputs:
     default: ''
 
   compose-file:
-    description: 'ec2-compose: compose file to bring up, relative to repo-dir.'
+    description: >-
+      ec2-compose: compose file(s) to bring up, relative to repo-dir.
+      Space-separated for an override stack, in precedence order — e.g.
+      `docker-compose.yml docker-compose.aws.yml`.
     required: false
     default: docker-compose.yml
+
+  compose-profiles:
+    description: 'ec2-compose: space-separated compose profiles to enable.'
+    required: false
+    default: ''
 
   ref:
     description: 'ec2-compose: git ref to check out on the host.'
@@ -360,6 +368,7 @@ runs:
         INSTANCE_ID: ${{ inputs.instance-id }}
         REPO_DIR: ${{ inputs.repo-dir }}
         COMPOSE_FILE: ${{ inputs.compose-file }}
+        COMPOSE_PROFILES_LIST: ${{ inputs.compose-profiles }}
         REF: ${{ inputs.ref }}
         ENV_PARAMETER_NAME: ${{ inputs.env-parameter-name }}
         ENV_FILE_NAME: ${{ inputs.env-file-name }}
@@ -383,7 +392,13 @@ runs:
         aws ssm get-parameter --name "$ENV_PARAMETER_NAME" --with-decryption \
           --query Parameter.Value --output text > "$REPO_DIR/$ENV_FILE_NAME"
 
-        docker compose -f "$COMPOSE_FILE" up -d --build --remove-orphans
+        # One -f per file and one --profile per profile. Built as an array so a
+        # multi-file override stack works without the caller quoting anything.
+        compose_args=()
+        for f in $COMPOSE_FILE; do compose_args+=(-f "$f"); done
+        for p in $COMPOSE_PROFILES_LIST; do compose_args+=(--profile "$p"); done
+
+        docker compose "${compose_args[@]}" up -d --build --remove-orphans
 
         if [ -n "$HEALTHCHECK_URL" ]; then
           for i in $(seq 1 30); do
@@ -394,7 +409,7 @@ runs:
             sleep 10
           done
           echo "FATAL: $HEALTHCHECK_URL never returned 2xx" >&2
-          docker compose -f "$COMPOSE_FILE" ps
+          docker compose "${compose_args[@]}" ps
           exit 1
         fi
         REMOTE
@@ -404,6 +419,7 @@ runs:
           echo "export REPO_DIR='$REPO_DIR'"
           echo "export REF='$REF'"
           echo "export COMPOSE_FILE='$COMPOSE_FILE'"
+          echo "export COMPOSE_PROFILES_LIST='$COMPOSE_PROFILES_LIST'"
           echo "export ENV_PARAMETER_NAME='$ENV_PARAMETER_NAME'"
           echo "export ENV_FILE_NAME='$ENV_FILE_NAME'"
           echo "export HEALTHCHECK_URL='$HEALTHCHECK_URL'"
