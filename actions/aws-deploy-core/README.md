@@ -21,6 +21,7 @@ composes [`load-infisical-secrets`](../load-infisical-secrets) ahead of this.
 | `target` | Status |
 |---|---|
 | `s3-cloudfront` | shipped |
+| `ec2-compose` | shipped — LumiOS on AWS is the consumer |
 | `lambda-image` | next — `arilearn-phx`'s extractor sidecar is the consumer |
 | `ecs-service` | not built. Nothing runs on ECS yet; added when something does |
 
@@ -45,6 +46,59 @@ steps:
       source-dir: out
 ```
 
+## `ec2-compose`
+
+Deploys a Docker Compose app onto an EC2 host **over SSM, not ssh**. The
+instance profile already carries `AmazonSSMManagedInstanceCore`, so there is no
+auth key to hold, no inbound port to open, and no long-lived credential anywhere
+in the path.
+
+```yaml
+  - uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+    id: env
+    with:
+      method: oidc
+      identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+      environment: prod
+      path: /lumios
+      export-as-env: dotenv
+      dotenv-output-path: ${{ runner.temp }}/.env
+
+  - uses: aretecp/github-actions/actions/aws-deploy-core@v2
+    with:
+      target: ec2-compose
+      aws-role-arn: ${{ vars.LUMIOS_DEPLOY_ROLE_ARN }}
+      instance-id: ${{ vars.LUMIOS_INSTANCE_ID }}
+      repo-dir: /opt/lumios
+      ref: ${{ github.sha }}
+      env-parameter-name: /lumios/prod/dotenv
+      env-file-path: ${{ runner.temp }}/.env
+      healthcheck-url: http://127.0.0.1:18000/health
+```
+
+### The dotenv does not travel through SendCommand
+
+`SendCommand` parameters are retained on the command record and copied into
+CloudWatch, so passing the rendered env that way would make every deploy a place
+the app's secrets are written in plaintext.
+
+Instead the action writes it to an SSM SecureString and the **host fetches it
+with its own instance role**, scoped to that one parameter path. The remote
+script writes it under `umask 077`.
+
+### The remote script is passed as jq-built JSON
+
+Not string-interpolated. A quote or newline in any input cannot break out of the
+parameters document.
+
+### Polling is manual, on `command-timeout`
+
+`aws ssm wait command-executed` gives up after roughly 100 seconds, which a cold
+image build outlasts every time. Both stdout and stderr are printed whatever the
+outcome — a deploy that fails silently is the failure mode this action exists to
+avoid.
+
 ## Config comes from SSM
 
 Terraform writes these parameters, so they cannot drift from the resources they
@@ -53,6 +107,7 @@ name. Convention is `{ssm-prefix}/{name}`:
 | Target | Parameters read |
 |---|---|
 | `s3-cloudfront` | `s3-bucket-name`, `cloudfront-distribution-id` |
+| `ec2-compose` | none — it is handed its instance id directly |
 
 A missing parameter fails with the full path in the error, before anything is
 mutated. The alternative — repository variables with hardcoded fallbacks, as
@@ -62,19 +117,28 @@ mutated. The alternative — repository variables with hardcoded fallbacks, as
 
 | Input | Required | Default | Notes |
 |---|---|---|---|
-| `target` | yes | — | `s3-cloudfront` |
+| `target` | yes | — | `s3-cloudfront` or `ec2-compose` |
 | `aws-role-arn` | yes | — | caller needs `id-token: write` |
 | `aws-region` | no | `us-east-1` | |
-| `ssm-prefix` | yes | — | must start with `/` |
 | `dry-run` | no | `false` | resolves config and reports, mutates nothing |
+| `ssm-prefix` | s3-cloudfront | — | must start with `/` |
 | `source-dir` | s3-cloudfront | — | built directory to sync |
 | `delete-removed` | no | `true` | `--delete` on the sync |
 | `invalidation-paths` | no | `/*` | space-separated |
 | `wait-for-invalidation` | no | `true` | see below |
+| `instance-id` | ec2-compose | — | needs the SSM agent + instance profile |
+| `repo-dir` | ec2-compose | — | absolute path to the checkout on the host |
+| `ref` | ec2-compose | — | git ref to check out on the host |
+| `env-parameter-name` | ec2-compose | — | SecureString holding the dotenv |
+| `env-file-path` | no | — | local dotenv to upload to that parameter |
+| `env-file-name` | no | `.env` | filename on the host |
+| `compose-file` | no | `docker-compose.yml` | relative to `repo-dir` |
+| `healthcheck-url` | no | — | curled on the host after `compose up` |
+| `command-timeout` | no | `1800` | seconds; a cold build outlasts less |
 
 ## Outputs
 
-`bucket`, `distribution-id`, `invalidation-id`.
+`bucket`, `distribution-id`, `invalidation-id`, `command-id`.
 
 ## Three things it does that the workflows it replaces did not
 
