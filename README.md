@@ -8,6 +8,7 @@ Reusable composite actions and workflows for `aretecp` repos. Drop-in `uses:` re
 |---|---|---|
 | [`load-infisical-secrets`](actions/load-infisical-secrets) | Load secrets from Infisical at workflow runtime. Supports env export, JSON output, and bare dotenv file render (v2). | `v2` (`@v1` frozen) |
 | [`tailscale-connect`](actions/tailscale-connect) | Join the Areté Tailscale tailnet. Wraps `tailscale/github-action` with a pinned SHA and corrected input names. | `v1` |
+| [`aws-deploy-core`](actions/aws-deploy-core) | Assume an AWS role via OIDC, resolve resource names from SSM, deploy, and wait for it to be live. Strategy by `target` input; `s3-cloudfront` shipped. Does not build. | `_in development_` |
 | [`teams-notify`](actions/teams-notify) | Post a MessageCard to a Teams incoming webhook. Semantic `status` colours, optional facts block and button, `dry-run` mode. Webhook passed via `env:`, not an input. | `v1` |
 
 More to come — Elixir/OTP setup, uv/Python setup. Each ships as its own composite action under `actions/<name>/`.
