@@ -1,0 +1,247 @@
+name: AWS deploy core
+description: >-
+  Assume an AWS role via OIDC, resolve the target's resource names from SSM,
+  deploy, and wait for the deploy to actually be live. Strategy is chosen by the
+  `target` input. Mirrors vps-deploy-core: one implementation, thin callers.
+
+  This action does NOT build. The build is npm, pnpm, docker or uv depending on
+  the app, so it stays with the caller — which is the only thing keeping the
+  input surface here from growing the way deploy-vps-shared's did.
+
+inputs:
+  target:
+    description: >-
+      Deploy strategy. Currently only `s3-cloudfront`. `lambda-image` is next;
+      `ecs-service` will be added when something actually runs on ECS.
+    required: true
+
+  aws-role-arn:
+    description: 'IAM role to assume via GitHub OIDC. The caller needs `id-token: write`.'
+    required: true
+
+  aws-region:
+    description: AWS region.
+    required: false
+    default: us-east-1
+
+  ssm-prefix:
+    description: >-
+      SSM parameter path prefix holding this app+env's resource names, e.g.
+      `/arete-intelligence-site/prod`. Terraform writes these, so they cannot
+      drift from the resources they name — which is why config comes from here
+      rather than from repository variables with hardcoded fallbacks.
+    required: true
+
+  dry-run:
+    description: >-
+      Resolve config and report what would happen, then stop before mutating
+      anything. `true` still assumes the role and reads SSM.
+    required: false
+    default: 'false'
+
+  # ── s3-cloudfront ────────────────────────────────────────────────────────
+  source-dir:
+    description: 's3-cloudfront: built directory to sync, e.g. `out` or `dist`.'
+    required: false
+    default: ''
+
+  delete-removed:
+    description: >-
+      s3-cloudfront: pass --delete to `aws s3 sync`, so files absent locally are
+      removed from the bucket. Leave true unless the bucket holds objects the
+      build does not produce.
+    required: false
+    default: 'true'
+
+  invalidation-paths:
+    description: 's3-cloudfront: space-separated CloudFront paths to invalidate.'
+    required: false
+    default: '/*'
+
+  wait-for-invalidation:
+    description: >-
+      s3-cloudfront: block until the invalidation completes. On by default,
+      because a job that goes green while the edge still serves the old bundle
+      is a deploy that reports success it has not achieved.
+    required: false
+    default: 'true'
+
+outputs:
+  bucket:
+    description: 's3-cloudfront: the bucket that was synced.'
+    value: ${{ steps.resolve.outputs.bucket }}
+  distribution-id:
+    description: 's3-cloudfront: the distribution that was invalidated.'
+    value: ${{ steps.resolve.outputs.distribution_id }}
+  invalidation-id:
+    description: 's3-cloudfront: the invalidation that was created.'
+    value: ${{ steps.invalidate.outputs.invalidation_id }}
+
+runs:
+  using: composite
+  steps:
+    # ── 1. Validate, before anything touches AWS ─────────────────────────────
+    # deploy-prod.yml in lumios is the cautionary tale: a missing key failed five
+    # consecutive prod deploys forty lines into an ssh step, and nobody noticed
+    # for three weeks, because a pipeline that fails safely looks like nothing
+    # changed. Fail here, by name, with nothing half-done behind it.
+    - name: Validate inputs for the selected target
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        SSM_PREFIX: ${{ inputs.ssm-prefix }}
+      run: |
+        set -euo pipefail
+
+        case "$SSM_PREFIX" in
+          /*) ;;
+          *) echo "::error::ssm-prefix must start with '/': got '$SSM_PREFIX'" >&2; exit 1 ;;
+        esac
+
+        case "$TARGET" in
+          s3-cloudfront)
+            if [ -z "$SOURCE_DIR" ]; then
+              echo "::error::target=s3-cloudfront requires source-dir." >&2
+              exit 1
+            fi
+            if [ ! -d "$SOURCE_DIR" ]; then
+              echo "::error::source-dir '$SOURCE_DIR' does not exist. Did the build step run, and does it output here?" >&2
+              exit 1
+            fi
+            if [ -z "$(ls -A "$SOURCE_DIR")" ]; then
+              echo "::error::source-dir '$SOURCE_DIR' is empty. Refusing to sync — with --delete this would empty the bucket." >&2
+              exit 1
+            fi
+            ;;
+          lambda-image|ecs-service)
+            echo "::error::target '$TARGET' is not implemented yet." >&2
+            exit 1
+            ;;
+          *)
+            echo "::error::Unknown target '$TARGET'. Supported: s3-cloudfront." >&2
+            exit 1
+            ;;
+        esac
+
+        echo "target=$TARGET validated"
+
+    # Passing an input that belongs to a different target means the caller
+    # believes something is happening that isn't. Silently ignoring it is how a
+    # deploy does the wrong thing and still reports success.
+    - name: Reject inputs from other targets
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+      run: |
+        set -euo pipefail
+        if [ "$TARGET" != "s3-cloudfront" ] && [ -n "$SOURCE_DIR" ]; then
+          echo "::error::source-dir belongs to target=s3-cloudfront, but target=$TARGET." >&2
+          exit 1
+        fi
+
+    # ── 2. Assume the role ───────────────────────────────────────────────────
+    # Used directly rather than wrapped. It is one library call, and a wrapper
+    # would only add a layer to read through when auth breaks.
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    # ── 3. Resolve resource names from SSM ───────────────────────────────────
+    - name: Resolve deploy targets from SSM
+      id: resolve
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        SSM_PREFIX: ${{ inputs.ssm-prefix }}
+        AWS_REGION: ${{ inputs.aws-region }}
+      run: |
+        set -euo pipefail
+
+        get_param() {
+          local name="$SSM_PREFIX/$1"
+          local value
+          if ! value=$(aws ssm get-parameter --name "$name" \
+                        --query 'Parameter.Value' --output text \
+                        --region "$AWS_REGION" 2>/dev/null); then
+            echo "::error::SSM parameter '$name' not found. Terraform writes these — has the app's workspace been applied in this environment?" >&2
+            return 1
+          fi
+          if [ -z "$value" ] || [ "$value" = "None" ]; then
+            echo "::error::SSM parameter '$name' is empty." >&2
+            return 1
+          fi
+          printf '%s' "$value"
+        }
+
+        if [ "$TARGET" = "s3-cloudfront" ]; then
+          bucket=$(get_param s3-bucket-name)
+          distribution_id=$(get_param cloudfront-distribution-id)
+          echo "bucket=$bucket" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$distribution_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "### AWS deploy target"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Bucket | \`$bucket\` |"
+            echo "| Distribution | \`$distribution_id\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    # ── 4. Deploy ────────────────────────────────────────────────────────────
+    - name: Sync to S3
+      if: ${{ inputs.target == 's3-cloudfront' }}
+      shell: bash
+      env:
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        BUCKET: ${{ steps.resolve.outputs.bucket }}
+        DELETE_REMOVED: ${{ inputs.delete-removed }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        args=()
+        [ "$DELETE_REMOVED" = "true" ] && args+=(--delete)
+        [ "$DRY_RUN" = "true" ] && args+=(--dryrun)
+        aws s3 sync "$SOURCE_DIR/" "s3://$BUCKET" "${args[@]}"
+
+    - name: Invalidate CloudFront
+      id: invalidate
+      if: ${{ inputs.target == 's3-cloudfront' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        DISTRIBUTION_ID: ${{ steps.resolve.outputs.distribution_id }}
+        PATHS: ${{ inputs.invalidation-paths }}
+      run: |
+        set -euo pipefail
+        # noglob before splitting. The default path is /*, which bash would
+        # expand against the runner's filesystem into /bin /dev /etc ... and
+        # invalidate a list of paths nobody asked for.
+        set -f
+        read -ra paths <<< "$PATHS"
+        id=$(aws cloudfront create-invalidation \
+              --distribution-id "$DISTRIBUTION_ID" \
+              --paths "${paths[@]}" \
+              --query 'Invalidation.Id' --output text)
+        echo "invalidation_id=$id" >> "$GITHUB_OUTPUT"
+        echo "Invalidation $id created for $PATHS"
+
+    # ── 5. Wait for it to actually be live ───────────────────────────────────
+    # The step this replaces fired the invalidation and exited. The job went
+    # green while the edge still served the previous bundle, so "deployed" and
+    # "reported deployed" were different things by several minutes.
+    - name: Wait for the invalidation to complete
+      if: ${{ inputs.target == 's3-cloudfront' && inputs.dry-run != 'true' && inputs.wait-for-invalidation == 'true' }}
+      shell: bash
+      env:
+        DISTRIBUTION_ID: ${{ steps.resolve.outputs.distribution_id }}
+        INVALIDATION_ID: ${{ steps.invalidate.outputs.invalidation_id }}
+      run: |
+        set -euo pipefail
+        aws cloudfront wait invalidation-completed \
+          --distribution-id "$DISTRIBUTION_ID" \
+          --id "$INVALIDATION_ID"
+        echo "Invalidation $INVALIDATION_ID completed."
