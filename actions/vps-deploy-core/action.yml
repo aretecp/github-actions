@@ -415,12 +415,19 @@ runs:
           # Empty token → no config at all, so behaviour is identical to before
           # for any caller that opts out.
           if [[ -n "${GH_TOKEN:-}" ]]; then
+            # Say which credential is in play. The first attempt at this failed
+            # with a byte-identical error and no way to tell whether the token was
+            # empty, the branch pin had not taken, or the mechanism was wrong — a
+            # silent skip made the change untestable. Never print the value.
+            echo "git auth: using the job token (${#GH_TOKEN} chars)"
             export GIT_CONFIG_COUNT=1
             export GIT_CONFIG_KEY_0="credential.helper"
             # `if`, not `&&`: a helper is also called with store/erase, and the
             # && form would exit non-zero on those. It answers `get` only, so a
             # token is never handed to git for a write it does not need.
             export GIT_CONFIG_VALUE_0='!f() { if test "$1" = get; then printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; fi; }; f'
+          else
+            echo "git auth: no job token supplied — relying on whatever credential this box already has"
           fi
 
           if [[ ! -d "$REPO_DIR/.git" ]]; then
