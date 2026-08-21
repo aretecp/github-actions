@@ -367,20 +367,18 @@ jobs:
 
     steps:
       - name: Deploy via vps-deploy-core
-        # ⚠ REVERT TO @v2 BEFORE MERGING ⚠
+        # Pinned to the moving major tag, like every other consumer.
         #
-        # Pinned to this branch ONLY so the change can be validated. A consumer
-        # pinning the WORKFLOW to a branch does not exercise a changed action,
-        # because this line resolves independently — the first validation attempt
-        # ran released `@v2` and produced a byte-identical failure, which is how
-        # that was discovered.
+        # This line briefly pointed at a feature branch so the git-auth change
+        # could be validated (#100). That is the only way to exercise a changed
+        # core action — `uses:` takes no expressions, and a relative
+        # `./actions/...` inside a REUSABLE workflow resolves against the CALLER's
+        # checkout, which has no such path. The branch pin then merged by mistake
+        # and GitHub deleted the branch, leaving main pointing at a dead ref.
         #
-        # It cannot be made an input: GitHub does not allow expressions in `uses:`.
-        # Nor can it be `./actions/vps-deploy-core` — inside a REUSABLE workflow a
-        # relative `uses:` resolves against the CALLER's checkout, which has no such
-        # path. So editing this line is the only way to validate a branch, and
-        # remembering to revert it is a real hazard worth a follow-up issue.
-        uses: aretecp/github-actions/actions/vps-deploy-core@feat/vps-git-auth-via-job-token
+        # So: any future validation must revert this line before merge, and that
+        # hazard is tracked rather than left to a comment nobody reads.
+        uses: aretecp/github-actions/actions/vps-deploy-core@v2
         with:
           infisical-identity-id: ${{ inputs.infisical-identity-id }}
           shared-project-slug: ${{ inputs.shared-project-slug }}
