@@ -86,6 +86,27 @@ inputs:
     required: false
     default: ''
 
+  github-token:
+    description: >-
+      ec2-compose: token the host uses to fetch a PRIVATE repo over HTTPS.
+      Defaults to the calling job's own token, so a caller that already
+      declares `permissions: contents: read` needs to pass nothing.
+
+      Staged through Parameter Store (github-token-parameter-name) rather than
+      SendCommand parameters — same reason the dotenv doesn't ride there
+      either. See vps-deploy-core's equivalent for the failure this prevents:
+      a host with no git credential deploys fine until the first fetch, then
+      dies with an auth error that names no fix.
+
+      Pass '' to opt out and keep whatever credential the host already has.
+    required: false
+    default: ${{ github.token }}
+
+  github-token-parameter-name:
+    description: 'ec2-compose: SSM parameter path to stage github-token through. Required when github-token is non-empty.'
+    required: false
+    default: ''
+
   env-parameter-name:
     description: >-
       ec2-compose: SSM SecureString parameter holding the rendered dotenv. The
@@ -360,6 +381,24 @@ runs:
           --overwrite >/dev/null
         echo "Wrote $(wc -l < "$ENV_FILE_PATH") lines to $ENV_PARAMETER_NAME"
 
+    - name: Upload the deploy token to Parameter Store
+      if: ${{ inputs.target == 'ec2-compose' && inputs.dry-run != 'true' && inputs.github-token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -z "$GH_TOKEN_PARAMETER_NAME" ]; then
+          echo "::error::github-token is set but github-token-parameter-name is empty." >&2
+          exit 1
+        fi
+        aws ssm put-parameter \
+          --name "$GH_TOKEN_PARAMETER_NAME" \
+          --type SecureString \
+          --value "$GH_TOKEN" \
+          --overwrite >/dev/null
+
     - name: Deploy over SSM
       id: send
       if: ${{ inputs.target == 'ec2-compose' && inputs.dry-run != 'true' }}
@@ -372,6 +411,7 @@ runs:
         REF: ${{ inputs.ref }}
         ENV_PARAMETER_NAME: ${{ inputs.env-parameter-name }}
         ENV_FILE_NAME: ${{ inputs.env-file-name }}
+        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
         HEALTHCHECK_URL: ${{ inputs.healthcheck-url }}
         COMMAND_TIMEOUT: ${{ inputs.command-timeout }}
       run: |
@@ -383,6 +423,22 @@ runs:
         cat > /tmp/deploy.sh <<'REMOTE'
         set -euo pipefail
         cd "$REPO_DIR"
+
+        # Fetched from Parameter Store rather than passed through SendCommand,
+        # same reason as the dotenv below. See vps-deploy-core's checkout step
+        # for the three properties that make this safe: inert on an SSH/git@
+        # remote, nothing written to .git/config, never on a command line.
+        if [ -n "${GH_TOKEN_PARAMETER_NAME:-}" ]; then
+          GH_TOKEN=$(aws ssm get-parameter --name "$GH_TOKEN_PARAMETER_NAME" \
+            --with-decryption --query Parameter.Value --output text)
+          echo "git auth: using the job token (${#GH_TOKEN} chars)"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="credential.helper"
+          export GIT_CONFIG_VALUE_0='!f() { if test "$1" = get; then printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; fi; }; f'
+        else
+          echo "git auth: no job token supplied — relying on whatever credential this host already has"
+        fi
+
         git fetch --quiet origin
         git checkout --quiet --force "$REF"
 
@@ -422,6 +478,7 @@ runs:
           echo "export COMPOSE_PROFILES_LIST='$COMPOSE_PROFILES_LIST'"
           echo "export ENV_PARAMETER_NAME='$ENV_PARAMETER_NAME'"
           echo "export ENV_FILE_NAME='$ENV_FILE_NAME'"
+          echo "export GH_TOKEN_PARAMETER_NAME='$GH_TOKEN_PARAMETER_NAME'"
           echo "export HEALTHCHECK_URL='$HEALTHCHECK_URL'"
           cat /tmp/deploy.sh
         } > /tmp/remote.sh
@@ -478,3 +535,13 @@ runs:
           exit 1
         fi
         echo "Deploy succeeded."
+
+    # always(): a token staged for a deploy that then failed is still a token
+    # sitting in Parameter Store. It self-expires with the job regardless, but
+    # not leaving it around is free.
+    - name: Delete the staged deploy token
+      if: ${{ always() && inputs.target == 'ec2-compose' && inputs.dry-run != 'true' && inputs.github-token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
+      run: aws ssm delete-parameter --name "$GH_TOKEN_PARAMETER_NAME" 2>/dev/null || true
