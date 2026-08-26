@@ -26,7 +26,37 @@ inputs:
 runs:
   using: composite
   steps:
+    # Self-hosted runners may BE tailnet nodes already (e.g. the omarchy
+    # runner). Running `tailscale up --authkey` there would re-authenticate the
+    # host as a fresh ephemeral node and hijack its identity, knocking it off
+    # the tailnet under its real name. So: detect an existing connection and
+    # skip the join entirely.
+    #
+    # Fail-safe direction matters. If the CLI exists but its state is
+    # unreadable (tailscaled socket permissions — non-root needs
+    # `tailscale set --operator=$USER`), we CANNOT tell "not connected" from
+    # "can't ask", and joining on a maybe-connected host is the dangerous
+    # branch. Hard-fail with instructions instead. Hosted runners have no
+    # tailscale CLI at all, so they always take the join path unchanged.
+    - name: Detect existing tailnet connection
+      id: detect
+      shell: bash
+      run: |
+        set -uo pipefail
+        if ! command -v tailscale >/dev/null 2>&1; then
+          echo "connected=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if TS_IP=$(tailscale ip -4 2>/dev/null | head -1) && [ -n "$TS_IP" ]; then
+          echo "Runner host is already on the tailnet — skipping join."
+          echo "connected=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "::error::tailscale CLI is present on this runner but its state is unreadable or disconnected. Refusing to run 'tailscale up --authkey' on a host that may already be a tailnet node (it would hijack the node identity). If this is a self-hosted runner that should be on the tailnet, connect it and grant the runner user operator access: 'sudo tailscale set --operator=<runner-user>'. If it should NOT be on the tailnet, remove the tailscale CLI from the host."
+        exit 1
+
     - name: Join Tailscale
+      if: steps.detect.outputs.connected == 'false'
       # v3 (resolved at time of authoring). Pinned by SHA to make upstream
       # bumps explicit. Use OAuth client/secret instead of authkey when
       # we migrate (see CONTRIBUTING.md auth migration note).

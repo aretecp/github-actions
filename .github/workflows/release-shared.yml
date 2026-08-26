@@ -51,9 +51,17 @@ on:
         type: string
         default: '22'
 
+      runner:
+        description: >-
+          Runner for this job: a GitHub-hosted image name or a self-hosted
+          runner label (e.g. `omarchy`). Self-hosted runners that are already
+          tailnet nodes are handled by tailscale-connect's join guard.
+        required: false
+        type: string
+        default: ubuntu-latest
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     permissions:
       contents: write
       issues: write

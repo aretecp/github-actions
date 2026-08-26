@@ -126,6 +126,14 @@ on:
         type: string
         default: ''
 
+      runner:
+        description: >-
+          Runner for this job: a GitHub-hosted image name or a self-hosted
+          runner label (e.g. `omarchy`). Self-hosted runners that are already
+          tailnet nodes are handled by tailscale-connect's join guard.
+        required: false
+        type: string
+        default: ubuntu-latest
     secrets:
       ANTHROPIC_API_KEY:
         description: 'Anthropic API key. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
@@ -136,7 +144,7 @@ jobs:
     if: |
       (github.event_name == 'issues') ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     timeout-minutes: 10
     permissions:
