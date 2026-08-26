@@ -64,7 +64,11 @@ inputs:
     default: ''
 
   repo-dir:
-    description: 'ec2-compose: absolute path to the app checkout on the host.'
+    description: >-
+      ec2-compose: absolute working directory on the host — where the
+      compose files land and the rendered dotenv gets written. No longer a
+      git checkout; the name stays for now since it's the only thing every
+      caller already knows.
     required: false
     default: ''
 
@@ -81,29 +85,14 @@ inputs:
     required: false
     default: ''
 
-  ref:
-    description: 'ec2-compose: git ref to check out on the host.'
-    required: false
-    default: ''
-
-  github-token:
+  image:
     description: >-
-      ec2-compose: token the host uses to fetch a PRIVATE repo over HTTPS.
-      Defaults to the calling job's own token, so a caller that already
-      declares `permissions: contents: read` needs to pass nothing.
-
-      Staged through Parameter Store (github-token-parameter-name) rather than
-      SendCommand parameters — same reason the dotenv doesn't ride there
-      either. See vps-deploy-core's equivalent for the failure this prevents:
-      a host with no git credential deploys fine until the first fetch, then
-      dies with an auth error that names no fix.
-
-      Pass '' to opt out and keep whatever credential the host already has.
-    required: false
-    default: ${{ github.token }}
-
-  github-token-parameter-name:
-    description: 'ec2-compose: SSM parameter path to stage github-token through. Required when github-token is non-empty.'
+      ec2-compose: full pre-built image reference to deploy, e.g.
+      `<account>.dkr.ecr.<region>.amazonaws.com/lumios:v6.17.1`. The caller
+      builds and pushes this itself, same as source-dir for s3-cloudfront —
+      this action does not build. The host authenticates to ECR with its own
+      instance role and pulls; no git, no Dockerfile, no source ever touches
+      the host.
     required: false
     default: ''
 
@@ -179,7 +168,7 @@ runs:
         SSM_PREFIX: ${{ inputs.ssm-prefix }}
         INSTANCE_ID: ${{ inputs.instance-id }}
         REPO_DIR: ${{ inputs.repo-dir }}
-        REF: ${{ inputs.ref }}
+        IMAGE: ${{ inputs.image }}
         ENV_PARAMETER_NAME: ${{ inputs.env-parameter-name }}
         ENV_FILE_PATH: ${{ inputs.env-file-path }}
       run: |
@@ -208,7 +197,7 @@ runs:
             missing=()
             [ -z "${INSTANCE_ID:-}" ] && missing+=(instance-id)
             [ -z "${REPO_DIR:-}" ] && missing+=(repo-dir)
-            [ -z "${REF:-}" ] && missing+=(ref)
+            [ -z "${IMAGE:-}" ] && missing+=(image)
             [ -z "${ENV_PARAMETER_NAME:-}" ] && missing+=(env-parameter-name)
             if (( ${#missing[@]} )); then
               echo "::error::target=ec2-compose requires: ${missing[*]}" >&2
@@ -381,24 +370,6 @@ runs:
           --overwrite >/dev/null
         echo "Wrote $(wc -l < "$ENV_FILE_PATH") lines to $ENV_PARAMETER_NAME"
 
-    - name: Upload the deploy token to Parameter Store
-      if: ${{ inputs.target == 'ec2-compose' && inputs.dry-run != 'true' && inputs.github-token != '' }}
-      shell: bash
-      env:
-        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
-        GH_TOKEN: ${{ inputs.github-token }}
-      run: |
-        set -euo pipefail
-        if [ -z "$GH_TOKEN_PARAMETER_NAME" ]; then
-          echo "::error::github-token is set but github-token-parameter-name is empty." >&2
-          exit 1
-        fi
-        aws ssm put-parameter \
-          --name "$GH_TOKEN_PARAMETER_NAME" \
-          --type SecureString \
-          --value "$GH_TOKEN" \
-          --overwrite >/dev/null
-
     - name: Deploy over SSM
       id: send
       if: ${{ inputs.target == 'ec2-compose' && inputs.dry-run != 'true' }}
@@ -406,90 +377,56 @@ runs:
       env:
         INSTANCE_ID: ${{ inputs.instance-id }}
         REPO_DIR: ${{ inputs.repo-dir }}
+        IMAGE: ${{ inputs.image }}
         COMPOSE_FILE: ${{ inputs.compose-file }}
         COMPOSE_PROFILES_LIST: ${{ inputs.compose-profiles }}
-        REF: ${{ inputs.ref }}
+        AWS_REGION: ${{ inputs.aws-region }}
         ENV_PARAMETER_NAME: ${{ inputs.env-parameter-name }}
         ENV_FILE_NAME: ${{ inputs.env-file-name }}
-        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
         HEALTHCHECK_URL: ${{ inputs.healthcheck-url }}
         COMMAND_TIMEOUT: ${{ inputs.command-timeout }}
+        RUNNER_CHECKOUT_DIR: ${{ github.workspace }}
+        DEPLOY_SCRIPT: ${{ github.action_path }}/scripts/ec2-compose-deploy.sh
       run: |
         set -euo pipefail
 
-        # The script the host runs. Written to a file and passed as JSON built
-        # by jq, so a quote or a newline in any value cannot break out of the
-        # parameters document.
-        cat > /tmp/deploy.sh <<'REMOTE'
-        set -euo pipefail
-        cd "$REPO_DIR"
-
-        # Fetched from Parameter Store rather than passed through SendCommand,
-        # same reason as the dotenv below. See vps-deploy-core's checkout step
-        # for the three properties that make this safe: inert on an SSH/git@
-        # remote, nothing written to .git/config, never on a command line.
-        if [ -n "${GH_TOKEN_PARAMETER_NAME:-}" ]; then
-          GH_TOKEN=$(aws ssm get-parameter --name "$GH_TOKEN_PARAMETER_NAME" \
-            --with-decryption --query Parameter.Value --output text)
-          echo "git auth: using the job token (${#GH_TOKEN} chars)"
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0="credential.helper"
-          export GIT_CONFIG_VALUE_0='!f() { if test "$1" = get; then printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; fi; }; f'
-        else
-          echo "git auth: no job token supplied — relying on whatever credential this host already has"
-        fi
-
-        git fetch --quiet origin
-        git checkout --quiet --force "$REF"
-
-        # Fetched here rather than passed in: SendCommand parameters are kept on
-        # the command record and copied into CloudWatch.
-        umask 077
-        aws ssm get-parameter --name "$ENV_PARAMETER_NAME" --with-decryption \
-          --query Parameter.Value --output text > "$REPO_DIR/$ENV_FILE_NAME"
-
-        # One -f per file and one --profile per profile. Built as an array so a
-        # multi-file override stack works without the caller quoting anything.
-        compose_args=()
-        for f in $COMPOSE_FILE; do compose_args+=(-f "$f"); done
-        for p in $COMPOSE_PROFILES_LIST; do compose_args+=(--profile "$p"); done
-
-        docker compose "${compose_args[@]}" up -d --build --remove-orphans
-
-        if [ -n "$HEALTHCHECK_URL" ]; then
-          for i in $(seq 1 30); do
-            if curl -fsS "$HEALTHCHECK_URL" >/dev/null 2>&1; then
-              echo "healthy after $i attempt(s)"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "FATAL: $HEALTHCHECK_URL never returned 2xx" >&2
-          docker compose "${compose_args[@]}" ps
-          exit 1
-        fi
-        REMOTE
-
-        # The host needs the values too; export them ahead of the script body.
+        # Every value the host script needs is a plain `export NAME='value'`
+        # line — the same mechanism already proven safe all through this
+        # action, never a generated shell snippet. COMPOSE_B64_<i> is
+        # positional: both here and in ec2-compose-deploy.sh, i is just the
+        # index of `for f in $COMPOSE_FILE` — no name-derivation to keep in
+        # sync between the two, just "iterate the same list the same way."
         {
           echo "export REPO_DIR='$REPO_DIR'"
-          echo "export REF='$REF'"
+          echo "export IMAGE='$IMAGE'"
           echo "export COMPOSE_FILE='$COMPOSE_FILE'"
           echo "export COMPOSE_PROFILES_LIST='$COMPOSE_PROFILES_LIST'"
+          echo "export AWS_REGION='$AWS_REGION'"
           echo "export ENV_PARAMETER_NAME='$ENV_PARAMETER_NAME'"
           echo "export ENV_FILE_NAME='$ENV_FILE_NAME'"
-          echo "export GH_TOKEN_PARAMETER_NAME='$GH_TOKEN_PARAMETER_NAME'"
           echo "export HEALTHCHECK_URL='$HEALTHCHECK_URL'"
-          cat /tmp/deploy.sh
+          i=0
+          for f in $COMPOSE_FILE; do
+            path="$RUNNER_CHECKOUT_DIR/$f"
+            if [ ! -s "$path" ]; then
+              echo "::error::compose-file '$f' not found in the checkout at $path." >&2
+              exit 1
+            fi
+            echo "export COMPOSE_B64_${i}='$(base64 -w0 "$path")'"
+            i=$((i + 1))
+          done
+          cat "$DEPLOY_SCRIPT"
         } > /tmp/remote.sh
 
+        # jq --rawfile, not string interpolation: a quote or a newline
+        # anywhere in remote.sh cannot break out of the parameters document.
         jq -n --rawfile script /tmp/remote.sh \
           '{commands: ($script | split("\n"))}' > /tmp/params.json
 
         command_id=$(aws ssm send-command \
           --instance-ids "$INSTANCE_ID" \
           --document-name AWS-RunShellScript \
-          --comment "deploy $REF" \
+          --comment "deploy $IMAGE" \
           --timeout-seconds "$COMMAND_TIMEOUT" \
           --parameters "file:///tmp/params.json" \
           --query 'Command.CommandId' --output text)
@@ -535,13 +472,3 @@ runs:
           exit 1
         fi
         echo "Deploy succeeded."
-
-    # always(): a token staged for a deploy that then failed is still a token
-    # sitting in Parameter Store. It self-expires with the job regardless, but
-    # not leaving it around is free.
-    - name: Delete the staged deploy token
-      if: ${{ always() && inputs.target == 'ec2-compose' && inputs.dry-run != 'true' && inputs.github-token != '' }}
-      shell: bash
-      env:
-        GH_TOKEN_PARAMETER_NAME: ${{ inputs.github-token-parameter-name }}
-      run: aws ssm delete-parameter --name "$GH_TOKEN_PARAMETER_NAME" 2>/dev/null || true
