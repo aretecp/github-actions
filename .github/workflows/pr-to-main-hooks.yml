@@ -141,6 +141,15 @@ on:
         description: 'Teams Workflow incoming webhook URL. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
         required: false
 
+# One summary per PR, not one per push. This fires on `synchronize`, so every
+# commit pushed to a develop -> main PR was starting a fresh Claude call to
+# regenerate the same summary -- pure spend, and only the last one's output
+# survives anyway. Cancelling in flight is safe here: the job only rewrites the
+# PR body and posts a card, so a superseded run has nothing worth finishing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   link-issues:
     runs-on: ${{ inputs.runner }}

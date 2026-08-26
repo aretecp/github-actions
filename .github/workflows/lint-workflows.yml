@@ -1,0 +1,66 @@
+name: Lint workflows
+
+# actionlint on every workflow in this repo, on every PR.
+#
+# Why this exists: `${{ runner.temp }}` was used in a job-level `env:` block in
+# #114. The `runner` context is not available there. That does not warn -- it
+# makes the whole workflow INVALID, so every run fails at startup with no jobs
+# and no log, which is far harder to diagnose than the npm error it was fixing.
+# It reached consumers because the v2 tag was moved before anyone had run a
+# linter. actionlint reports it in about a second:
+#
+#   context "runner" is not allowed here. available contexts are "github",
+#   "inputs", "matrix", "needs", "secrets", "strategy", "vars"
+#
+# This repo warrants it more than any consumer: a mistake here ships to every
+# repo pinned to @v2 at once, and reusable workflows get no other validation.
+#
+# Hosted on purpose, per aretecp/github-actions#116 -- it is seconds long and
+# has no cache to warm.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The upstream release binary, not a wrapper action. `raven-actions/
+      # actionlint@v2.0.0` npm-installs into the workspace root and then
+      # resolves @actions/tool-cache from THERE rather than its own bundle,
+      # crashing with ERR_PACKAGE_PATH_NOT_EXPORTED before it lints anything.
+      # A one-binary download has no dependency to conflict with.
+      #
+      # Version pinned: a linter that moves under you turns an unrelated PR red
+      # for a rule nobody opted into.
+      #
+      # `-shellcheck=` (empty) disables the shellcheck pass. These are reusable
+      # workflows called with inputs this repo cannot see, so SC2086-style
+      # advice on `${{ }}` interpolation is noise. Real errors -- invalid
+      # contexts, bad syntax, unknown keys -- still fail the job.
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -color -shellcheck=

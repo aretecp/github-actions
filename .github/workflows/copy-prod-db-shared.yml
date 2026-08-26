@@ -227,6 +227,14 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+# `cancel-in-progress: false` -- two of these must never overlap. This
+# overwrites a dev database from prod; interleaving two copies of different
+# snapshots produces a dev DB that matches neither. Queue, do not race, and do
+# not cancel one partway through a restore.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.db-type }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   copy-db:
     name: Copy prod DB → dev (${{ inputs.db-type }})

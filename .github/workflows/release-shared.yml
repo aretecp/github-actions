@@ -59,6 +59,15 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+# `cancel-in-progress: false` -- NEVER cancel a release. This job stages a
+# commit, pushes to main, waits on CI, then tags via semantic-release; killing
+# it partway can leave a staged commit on main with no tag, which is exactly the
+# state someone has to unpick by hand. Queueing a second release behind the
+# first is correct; racing them is not.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ${{ inputs.runner }}
