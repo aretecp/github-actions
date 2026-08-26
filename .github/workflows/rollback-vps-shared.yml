@@ -246,10 +246,18 @@ on:
         type: string
         default: ''
 
+      runner:
+        description: >-
+          Runner for this job: a GitHub-hosted image name or a self-hosted
+          runner label (e.g. `omarchy`). Self-hosted runners that are already
+          tailnet nodes are handled by tailscale-connect's join guard.
+        required: false
+        type: string
+        default: ubuntu-latest
 jobs:
   rollback:
     name: Rollback VPS (${{ inputs.environment }}) → ${{ inputs.version }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
 
     # Same target-scoped key as deploy-vps-shared (see the long comment there),
