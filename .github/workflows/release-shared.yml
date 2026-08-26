@@ -69,8 +69,8 @@ jobs:
     # semantic-release ran, so no release could be cut at all. Any consumer
     # passing a self-hosted `runner:` would hit the same wall.
     env:
-      npm_config_cache: ${{ runner.temp }}/.npm
-      npm_config_prefix: ${{ runner.temp }}/npm-global
+      npm_config_cache: ${{ github.workspace }}/.npm-cache
+      npm_config_prefix: ${{ github.workspace }}/.npm-global
     permissions:
       contents: write
       issues: write

@@ -153,8 +153,8 @@ jobs:
     # cache and global prefix at the workspace instead of $HOME, which on a
     # self-hosted runner is often a directory the runner user cannot create.
     env:
-      npm_config_cache: ${{ runner.temp }}/.npm
-      npm_config_prefix: ${{ runner.temp }}/npm-global
+      npm_config_cache: ${{ github.workspace }}/.npm-cache
+      npm_config_prefix: ${{ github.workspace }}/.npm-global
     permissions:
       contents: read
       pull-requests: write
@@ -202,7 +202,7 @@ jobs:
           npm install -g @anthropic-ai/claude-code@latest
           # `npm_config_prefix` moves the global bin off the default PATH, so
           # make it findable for the steps that actually invoke `claude`.
-          echo "${{ runner.temp }}/npm-global/bin" >> "$GITHUB_PATH"
+          echo "${{ github.workspace }}/.npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Gather PR context
         id: context
