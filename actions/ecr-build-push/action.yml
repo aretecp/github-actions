@@ -1,0 +1,108 @@
+name: ECR build and push
+description: >-
+  Assume an AWS role via OIDC, then get an image into ECR tagged by both an
+  immutable ref (a commit SHA) and a human-readable version -- skipping the
+  build entirely if the immutable tag is already there. That's what turns a
+  rollback into a retag instead of a rebuild: re-run with an older version and
+  this only adds a tag, it never rebuilds a SHA that's already in the registry.
+
+  docker build/push only -- the same shape would work for any builder, but
+  every current caller is Docker. Extend build-command if that changes rather
+  than adding a second build path here.
+
+inputs:
+  aws-role-arn:
+    description: 'IAM role to assume via GitHub OIDC. The caller needs `id-token: write`.'
+    required: true
+
+  aws-region:
+    description: AWS region.
+    required: false
+    default: us-east-1
+
+  repository:
+    description: 'ECR repository name (not the full URI).'
+    required: true
+
+  sha:
+    description: 'Immutable tag -- the commit this image was built from. Existence of this tag is what decides build vs. retag.'
+    required: true
+
+  version:
+    description: 'Human-readable tag to also apply (e.g. a release tag). Omit to only tag by sha.'
+    required: false
+    default: ''
+
+  context:
+    description: 'Build context passed to `docker build`.'
+    required: false
+    default: '.'
+
+  dockerfile:
+    description: 'Dockerfile path, relative to context.'
+    required: false
+    default: Dockerfile
+
+  build-args:
+    description: 'Newline-separated KEY=VALUE pairs, one per `docker build --build-arg`.'
+    required: false
+    default: ''
+
+outputs:
+  image:
+    description: 'Full registry/repository:sha reference -- what the caller hands to a deploy step.'
+    value: ${{ steps.resolve.outputs.image }}
+  built:
+    description: '"true" if this run built and pushed a new image, "false" if it found the sha already in ECR and only retagged.'
+    value: ${{ steps.resolve.outputs.built }}
+
+runs:
+  using: composite
+  steps:
+    - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - uses: aws-actions/amazon-ecr-login@62f4f872db3836360b72999f4b87f1ff13310f3a # v2
+      id: ecr
+
+    - name: Build if missing, else retag
+      id: resolve
+      shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        SHA: ${{ inputs.sha }}
+        VERSION: ${{ inputs.version }}
+        CONTEXT: ${{ inputs.context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        BUILD_ARGS: ${{ inputs.build-args }}
+        REGISTRY: ${{ steps.ecr.outputs.registry }}
+      run: |
+        set -euo pipefail
+        image="${REGISTRY}/${REPOSITORY}:${SHA}"
+
+        if aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$SHA" >/dev/null 2>&1; then
+          echo "built=false" >> "$GITHUB_OUTPUT"
+          echo "$REPOSITORY:$SHA already in ECR -- retagging instead of rebuilding."
+          if [ -n "$VERSION" ]; then
+            manifest=$(aws ecr batch-get-image --repository-name "$REPOSITORY" --image-ids imageTag="$SHA" --query 'images[0].imageManifest' --output text)
+            aws ecr put-image --repository-name "$REPOSITORY" --image-tag "$VERSION" --image-manifest "$manifest" >/dev/null 2>&1 \
+              || aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$VERSION" >/dev/null
+          fi
+        else
+          echo "built=true" >> "$GITHUB_OUTPUT"
+          build_args=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && build_args+=(--build-arg "$line")
+          done <<< "$BUILD_ARGS"
+
+          tags=(--tag "$image")
+          [ -n "$VERSION" ] && tags+=(--tag "${REGISTRY}/${REPOSITORY}:${VERSION}")
+
+          docker build --pull -f "$CONTEXT/$DOCKERFILE" "${build_args[@]}" "${tags[@]}" "$CONTEXT"
+          docker push "$image"
+          [ -n "$VERSION" ] && docker push "${REGISTRY}/${REPOSITORY}:${VERSION}"
+        fi
+
+        echo "image=$image" >> "$GITHUB_OUTPUT"
