@@ -42,13 +42,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned rather than @latest: a linter that changes under you turns an
-      # unrelated PR red for a rule nobody opted into.
+      # The upstream release binary, not a wrapper action. `raven-actions/
+      # actionlint@v2.0.0` npm-installs into the workspace root and then
+      # resolves @actions/tool-cache from THERE rather than its own bundle,
+      # crashing with ERR_PACKAGE_PATH_NOT_EXPORTED before it lints anything.
+      # A one-binary download has no dependency to conflict with.
+      #
+      # Version pinned: a linter that moves under you turns an unrelated PR red
+      # for a rule nobody opted into.
+      #
+      # `-shellcheck=` (empty) disables the shellcheck pass. These are reusable
+      # workflows called with inputs this repo cannot see, so SC2086-style
+      # advice on `${{ }}` interpolation is noise. Real errors -- invalid
+      # contexts, bad syntax, unknown keys -- still fail the job.
       - name: Run actionlint
-        uses: raven-actions/actionlint@v2.0.0
-        with:
-          # Reusable workflows are called with inputs this repo cannot see, so
-          # shellcheck's SC2086-style advice on `${{ }}` interpolation is noise
-          # here. Real errors -- invalid contexts, bad syntax, unknown keys --
-          # are still failures.
-          shellcheck: false
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -color -shellcheck=
