@@ -147,6 +147,12 @@ jobs:
     runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     timeout-minutes: 10
+    # See pr-to-main-hooks.yml: `npm install -g` assumed a hosted runner's
+    # preinstalled npm and writable HOME, and neither holds once `runner:` names
+    # a self-hosted label.
+    env:
+      npm_config_cache: ${{ runner.temp }}/.npm
+      npm_config_prefix: ${{ runner.temp }}/npm-global
     permissions:
       contents: read
       issues: write
@@ -196,8 +202,16 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code@latest
+        run: |
+          npm install -g @anthropic-ai/claude-code@latest
+          # `npm_config_prefix` moves the global bin off the default PATH, so
+          # make it findable for the steps that actually invoke `claude`.
+          echo "${{ runner.temp }}/npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Acknowledge trigger
         env:
