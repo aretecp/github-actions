@@ -62,6 +62,15 @@ on:
 jobs:
   release:
     runs-on: ${{ inputs.runner }}
+    # setup-node below supplies node and npm, but npm still writes its cache
+    # under $HOME -- and a self-hosted runner's HOME is frequently a directory
+    # the runner user cannot create. lumios' own copy of this workflow died on
+    # `ENOENT: mkdir '/opt/arete/actions-runner/.npm'` at `npm ci`, before
+    # semantic-release ran, so no release could be cut at all. Any consumer
+    # passing a self-hosted `runner:` would hit the same wall.
+    env:
+      npm_config_cache: ${{ runner.temp }}/.npm
+      npm_config_prefix: ${{ runner.temp }}/npm-global
     permissions:
       contents: write
       issues: write

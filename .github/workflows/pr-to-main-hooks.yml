@@ -145,6 +145,16 @@ jobs:
   link-issues:
     runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
+    # `npm install -g` below assumed a hosted runner: npm preinstalled, HOME
+    # writable, a global prefix it may write to. None of that holds once
+    # `runner:` names a self-hosted label -- lumios hit `npm: command not found`
+    # on every develop -> main promotion, so no issues were linked and no Teams
+    # card was posted. setup-node supplies the toolchain; these two point npm's
+    # cache and global prefix at the workspace instead of $HOME, which on a
+    # self-hosted runner is often a directory the runner user cannot create.
+    env:
+      npm_config_cache: ${{ runner.temp }}/.npm
+      npm_config_prefix: ${{ runner.temp }}/npm-global
     permissions:
       contents: read
       pull-requests: write
@@ -183,8 +193,16 @@ jobs:
           environment: ${{ inputs.infisical-app-env || 'prod' }}
           path: ${{ inputs.infisical-app-path || '/github-actions' }}
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code@latest
+        run: |
+          npm install -g @anthropic-ai/claude-code@latest
+          # `npm_config_prefix` moves the global bin off the default PATH, so
+          # make it findable for the steps that actually invoke `claude`.
+          echo "${{ runner.temp }}/npm-global/bin" >> "$GITHUB_PATH"
 
       - name: Gather PR context
         id: context
