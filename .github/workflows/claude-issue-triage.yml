@@ -139,6 +139,14 @@ on:
         description: 'Anthropic API key. Required UNLESS infisical-identity-id is set (then loaded via OIDC).'
         required: false
 
+# One triage per issue. Several `@claude` comments in a row, or an issue opened
+# and immediately commented on, otherwise start parallel runs that each post
+# their own report. The newest comment is the one being answered, so superseding
+# is correct.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   triage:
     if: |

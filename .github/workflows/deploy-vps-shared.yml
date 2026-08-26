@@ -323,6 +323,14 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+# `cancel-in-progress: false` -- never cancel a deploy. Half-applied compose
+# state on the target host is worse than a queued deploy, and two deploys racing
+# to the same VPS can interleave container recreation. Scoped by environment so
+# a dev deploy never queues behind a prod one.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy to VPS (${{ inputs.environment }})

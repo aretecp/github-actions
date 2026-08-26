@@ -1,0 +1,54 @@
+name: Lint workflows
+
+# actionlint on every workflow in this repo, on every PR.
+#
+# Why this exists: `${{ runner.temp }}` was used in a job-level `env:` block in
+# #114. The `runner` context is not available there. That does not warn -- it
+# makes the whole workflow INVALID, so every run fails at startup with no jobs
+# and no log, which is far harder to diagnose than the npm error it was fixing.
+# It reached consumers because the v2 tag was moved before anyone had run a
+# linter. actionlint reports it in about a second:
+#
+#   context "runner" is not allowed here. available contexts are "github",
+#   "inputs", "matrix", "needs", "secrets", "strategy", "vars"
+#
+# This repo warrants it more than any consumer: a mistake here ships to every
+# repo pinned to @v2 at once, and reusable workflows get no other validation.
+#
+# Hosted on purpose, per aretecp/github-actions#116 -- it is seconds long and
+# has no cache to warm.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than @latest: a linter that changes under you turns an
+      # unrelated PR red for a rule nobody opted into.
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2.0.0
+        with:
+          # Reusable workflows are called with inputs this repo cannot see, so
+          # shellcheck's SC2086-style advice on `${{ }}` interpolation is noise
+          # here. Real errors -- invalid contexts, bad syntax, unknown keys --
+          # are still failures.
+          shellcheck: false

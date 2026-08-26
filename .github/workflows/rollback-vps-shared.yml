@@ -254,6 +254,13 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+# `cancel-in-progress: false` -- a rollback is what you run when something is
+# already wrong, so it is the last thing that should be cancelled or raced.
+# Scoped by environment so a dev rollback never queues behind a prod one.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   rollback:
     name: Rollback VPS (${{ inputs.environment }}) → ${{ inputs.version }}
