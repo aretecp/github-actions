@@ -33,6 +33,13 @@ umask 077
 aws ssm get-parameter --name "$ENV_PARAMETER_NAME" --with-decryption \
   --query Parameter.Value --output text > "$REPO_DIR/$ENV_FILE_NAME"
 
+# IMAGE only exists as a shell var for this invocation -- a later, separate
+# `docker compose` call on this host (a smoke check, a manual restart) has
+# no idea what to interpolate otherwise. Persisting it here, not just
+# exporting it below, is what makes those later calls work at all. Only
+# takes effect when ENV_FILE_NAME is Compose's own auto-loaded `.env`.
+echo "IMAGE=$IMAGE" >> "$REPO_DIR/$ENV_FILE_NAME"
+
 # One -f per file and one --profile per profile. Built as an array so a
 # multi-file override stack works without the caller quoting anything.
 compose_args=()
