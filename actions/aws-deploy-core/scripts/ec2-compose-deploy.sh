@@ -46,7 +46,10 @@ compose_args=()
 for f in $COMPOSE_FILE; do compose_args+=(-f "$f"); done
 for p in $COMPOSE_PROFILES_LIST; do compose_args+=(--profile "$p"); done
 
-IMAGE="$IMAGE" docker compose "${compose_args[@]}" pull
+# --quiet: SSM caps command output at 24KB. Multi-layer pull progress alone
+# blows past that, so a real failure's actual message never made it back --
+# both GitHub's log and SSM's own API were truncating the same noise.
+IMAGE="$IMAGE" docker compose "${compose_args[@]}" pull --quiet
 IMAGE="$IMAGE" docker compose "${compose_args[@]}" up -d --remove-orphans
 
 if [ -n "$HEALTHCHECK_URL" ]; then
