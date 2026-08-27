@@ -279,7 +279,25 @@ jobs:
             done | sort -n -u || true)
           echo "Candidates from PR bodies: $(echo $BODY_CANDIDATES | tr '\n' ' ')"
 
-          CANDIDATES=$(printf '%s\n%s\n' "$CANDIDATES" "$BODY_CANDIDATES" \
+          # ── Third source: `Closes #N` already sitting in THIS PR's body ──
+          #
+          # A human can hand-edit the description to add a Closes line for
+          # an issue no commit or feature-PR references — legitimate, and
+          # worth keeping. It used to be trusted blindly with no `gh issue
+          # view` check (see the "Update PR description" step's old
+          # EXISTING_CLOSES), so a bogus number pasted into the body — a
+          # template copied from another repo, a Linear ticket ID — got
+          # echoed back as a real `Closes #N` on every subsequent run
+          # forever, since nothing ever re-validated it. Folding it into
+          # $CANDIDATES here routes it through the same validation loop as
+          # everything else instead of a second, unchecked path.
+          gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q '.body // ""' > /tmp/current-body.txt
+          EXISTING_CLOSES=$(cat /tmp/current-body.txt \
+            | grep -oiE '(closes|close|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#[0-9]+' \
+            | grep -oE '#[0-9]+' | tr -d '#' || true)
+          echo "Candidates already in PR body: $(echo $EXISTING_CLOSES | tr '\n' ' ')"
+
+          CANDIDATES=$(printf '%s\n%s\n%s\n' "$CANDIDATES" "$BODY_CANDIDATES" "$EXISTING_CLOSES" \
             | grep -v '^[[:space:]]*$' | sort -n -u || true)
           echo "Candidates (union): $(echo $CANDIDATES | tr '\n' ' ')"
 
@@ -419,18 +437,19 @@ jobs:
 
           PR_NUMBER=${{ github.event.pull_request.number }}
           REPO=${{ github.repository }}
-          ISSUES=$(cat /tmp/issues.txt)
 
-          # Get current PR body
-          CURRENT_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q '.body // ""')
+          # Reuse the context step's fetch — nothing edits the PR body
+          # between these two steps within a single run, so a second
+          # `gh pr view` call here would just be spend for spend's sake.
+          CURRENT_BODY=$(cat /tmp/current-body.txt)
 
           SUMMARY=$(cat /tmp/summary.md)
 
-          # Collect existing Closes #N from body (with or without markers)
-          EXISTING_CLOSES=$(printf "%b" "$CURRENT_BODY" | grep -oiE '(closes|close|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -n -u || true)
-
-          # Union existing closes with newly discovered issues
-          ALL_ISSUES=$(printf "%s\n%s" "$EXISTING_CLOSES" "$(cat /tmp/issues.txt)" | grep -v '^$' | sort -n -u || true)
+          # /tmp/issues.txt is already the validated set — every number in
+          # it, including ones pulled from the PR body itself, passed
+          # `gh issue view` in the context step. Nothing here re-scans the
+          # body unvalidated.
+          ALL_ISSUES=$(sort -n -u /tmp/issues.txt || true)
 
           # Build Closes lines
           CLOSES_LINES=""
