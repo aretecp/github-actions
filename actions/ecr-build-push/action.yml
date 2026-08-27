@@ -48,6 +48,25 @@ inputs:
     required: false
     default: ''
 
+  platforms:
+    description: 'Comma-separated target platforms (e.g. linux/amd64). Empty uses the buildx default for this runner.'
+    required: false
+    default: ''
+
+  provenance:
+    description: >-
+      Passed through to `docker buildx build --provenance`. Empty leaves
+      buildx's own default (attestations on). Set "false" for a Lambda
+      container image -- Lambda rejects the OCI image index / attestation
+      manifest buildx otherwise attaches, and needs a single-platform image.
+    required: false
+    default: ''
+
+  sbom:
+    description: 'Passed through to `docker buildx build --sbom`. Empty leaves the buildx default. See provenance.'
+    required: false
+    default: ''
+
 outputs:
   image:
     description: 'Full registry/repository:sha reference -- what the caller hands to a deploy step.'
@@ -79,6 +98,9 @@ runs:
         CONTEXT: ${{ inputs.context }}
         DOCKERFILE: ${{ inputs.dockerfile }}
         BUILD_ARGS: ${{ inputs.build-args }}
+        PLATFORMS: ${{ inputs.platforms }}
+        PROVENANCE: ${{ inputs.provenance }}
+        SBOM: ${{ inputs.sbom }}
         REGISTRY: ${{ steps.ecr.outputs.registry }}
       run: |
         set -euo pipefail
@@ -102,6 +124,11 @@ runs:
           tags=(--tag "$image")
           [ -n "$VERSION" ] && tags+=(--tag "${REGISTRY}/${REPOSITORY}:${VERSION}")
 
+          extra_flags=()
+          [ -n "$PLATFORMS" ] && extra_flags+=(--platform "$PLATFORMS")
+          [ -n "$PROVENANCE" ] && extra_flags+=(--provenance="$PROVENANCE")
+          [ -n "$SBOM" ] && extra_flags+=(--sbom="$SBOM")
+
           # GHA-backed layer cache: a fresh runner has nothing local to reuse,
           # so without this every build re-runs npm ci / uv sync / apt-get
           # from scratch even when their inputs are unchanged. Cache hits are
@@ -110,7 +137,7 @@ runs:
           docker buildx build --pull \
             --cache-from "type=gha,scope=${REPOSITORY}" \
             --cache-to "type=gha,scope=${REPOSITORY},mode=max" \
-            -f "$CONTEXT/$DOCKERFILE" "${build_args[@]}" "${tags[@]}" --push "$CONTEXT"
+            -f "$CONTEXT/$DOCKERFILE" "${build_args[@]}" "${extra_flags[@]}" "${tags[@]}" --push "$CONTEXT"
         fi
 
         echo "image=$image" >> "$GITHUB_OUTPUT"
