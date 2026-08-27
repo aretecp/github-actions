@@ -112,6 +112,16 @@ Or pin to a specific version / SHA for stricter reproducibility:
 - uses: aretecp/github-actions/actions/load-infisical-secrets@<full-commit-sha>
 ```
 
+## Runners and CI
+
+Which runner a job belongs on, the concurrency policy, and the traps on the
+self-hosted host — read this before moving a job or adding a workflow:
+[`docs/runbooks/runners-and-ci.md`](docs/runbooks/runners-and-ci.md).
+
+Short version: containerized CI and dev deploys on `[self-hosted, omarchy]`,
+release and prod deploys on `ubuntu-latest`. The `runner:` input on every shared
+workflow defaults to hosted and is the fail-back when the self-hosted box is down.
+
 ## Versioning
 
 - `@v1` — moving major tag; tracks the latest `1.x.y`. Recommended for most consumers.

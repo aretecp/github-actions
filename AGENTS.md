@@ -11,6 +11,15 @@
 - Keep plans in `docs/features/[feature]/PLAN.md`.
 - Run `/end-session` before closing meaningful work.
 
+## Runners and CI
+- Read [`docs/runbooks/runners-and-ci.md`](docs/runbooks/runners-and-ci.md) before
+  touching a workflow. It carries the runner rule, the concurrency policy, and the
+  self-hosted traps.
+- Run `actionlint -color -shellcheck=` before pushing a workflow change. The
+  `runner` context in job-level `env:` does not warn — it makes the workflow
+  invalid and every run fails at startup with no jobs and no log.
+- After merging, move the `v2` tag. Consumers pin it, so a merge alone ships nothing.
+
 ## Verification
 - Add the project test command here.
 - Add the project lint/typecheck command here.
