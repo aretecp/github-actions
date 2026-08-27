@@ -301,12 +301,20 @@ jobs:
             | grep -v '^[[:space:]]*$' | sort -n -u || true)
           echo "Candidates (union): $(echo $CANDIDATES | tr '\n' ' ')"
 
-          # Validate each candidate is an actual issue (not a PR)
+          # `gh issue view` prints a title for a PR number too (GitHub's
+          # issues API returns PRs) — caught live via an impossible
+          # `state: MERGED` on aretecp/lumios#2110. The REST payload's
+          # `pull_request` key is the actual filter.
           : > /tmp/issues.txt
           : > /tmp/issue-context.txt
           for NUM in $CANDIDATES; do
             echo "Validating #${NUM}..."
-            TITLE=$(gh issue view "$NUM" --repo "$REPO" --json title -q '.title' 2>/dev/null) || { echo "  -> skipped (not an issue)"; continue; }
+            ISSUE_JSON=$(gh api "repos/${REPO}/issues/${NUM}" 2>/dev/null) || { echo "  -> skipped (not found)"; continue; }
+            if echo "$ISSUE_JSON" | jq -e 'has("pull_request")' >/dev/null; then
+              echo "  -> skipped (is a PR, not an issue)"
+              continue
+            fi
+            TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
             echo "  -> found: ${TITLE}"
             echo "$NUM" >> /tmp/issues.txt
             echo "#${NUM}: ${TITLE}" >> /tmp/issue-context.txt
