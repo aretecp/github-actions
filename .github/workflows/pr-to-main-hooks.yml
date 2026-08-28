@@ -170,6 +170,20 @@ jobs:
       issues: read
       id-token: write
     steps:
+      # Root-running job containers from an earlier run can leave root-owned
+      # files in a self-hosted runner's persistent workspace, which
+      # `actions/checkout` can neither clean nor recreate (`EACCES: permission
+      # denied, rmdir` — hit on lumios's develop -> main promotion, run
+      # 33186838497). Docker is already a runner prerequisite, so route the
+      # cleanup through a container instead of depending on sudo or the stale
+      # files' host ownership. A no-op on a fresh hosted-runner workspace.
+      - name: Remove root-owned workspace residue
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            alpine:3.22 \
+            sh -c 'rm -rf /workspace/* /workspace/.[!.]* /workspace/..?*'
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -229,38 +243,50 @@ jobs:
           COMMITS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate -q '.[].commit.message')
           echo "$COMMITS" > /tmp/commits.txt
 
-          # Extract issue numbers: filter out merge commits, then grab all #N from the rest
-          NON_MERGE=$(echo "$COMMITS" | grep -viE '^Merge (pull request|branch)' || true)
-          echo "::group::Non-merge commit lines"
-          echo "$NON_MERGE"
-          echo "::endgroup::"
+          SUBJECTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
+                       -q '.[].commit.message | split("\n")[0]')
 
-          CANDIDATES=$(echo "$NON_MERGE" | grep -oE '#[0-9]+' | sort -t'#' -k2 -n -u | tr -d '#' || true)
-          echo "Candidates from commit messages: $CANDIDATES"
+          # ── First source: explicit closing keyword on a commit SUBJECT ───────
+          #
+          # `#N` alone in a subject is Areté's "relates to" convention
+          # (git-discipline.md: `feat: #42 ...`), not a closing signal — a
+          # multi-PR issue picks it up on every commit of its groundwork.
+          # Matching it as a close, and matching it anywhere in the full
+          # commit MESSAGE (body included), together closed six open lumios
+          # issues on one promotion (#2110): three from body prose that
+          # explicitly said the work was NOT done ("Not done here: #940"),
+          # and three whose only reference was `feat: #2109 ...` in a
+          # groundwork commit's subject. Only an explicit closing keyword on
+          # the subject line counts here, matching the grammar the PR-body
+          # and PR-description sources below already require. Bare `#N` is
+          # a mention, not a close.
+          NON_MERGE_SUBJECTS=$(echo "$SUBJECTS" | grep -viE '^Merge (pull request|branch)' || true)
+          CANDIDATES=$(echo "$NON_MERGE_SUBJECTS" \
+            | grep -oP '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\K[0-9]+' \
+            | sort -n -u || true)
+          echo "Candidates from commit subjects: $(echo $CANDIDATES | tr '\n' ' ')"
 
           # ── Second source: `Closes #N` in the FEATURE PRs' descriptions ──────
           #
-          # The scan above matches Areté's COMMIT convention (`feat: #42 ...`).
-          # It cannot see the other convention: GitHub's `Closes #N` in a pull
-          # request description. On a `develop` -> `main` flow GitHub never acts
-          # on those itself — closing keywords only fire when a PR merges into
-          # the DEFAULT branch — and the later promotion does not re-scan them,
-          # so those issues stay open indefinitely and get closed by hand.
+          # The scan above only catches an explicit closing keyword landing
+          # directly on a promotion commit's subject — rare, since our own
+          # convention is `feat: #42 ...`, not `Closes #42 ...`. It cannot see
+          # GitHub's `Closes #N` convention in a pull request description
+          # either. On a `develop` -> `main` flow GitHub never acts on those
+          # itself — closing keywords only fire when a PR merges into the
+          # DEFAULT branch — and the later promotion does not re-scan them, so
+          # those issues stay open indefinitely and get closed by hand.
           #
-          # Measured on the aretecp/areteos 1557 promotion: the commit scan above
-          # yielded exactly one candidate, which was a PR and correctly dropped,
-          # leaving nothing — while PR #1544's body declared 13 issues and #1551
-          # declared a 14th.
+          # Measured on the aretecp/areteos 1557 promotion: PR #1544's body
+          # declared 13 issues and #1551 declared a 14th.
           #
           # Feature PRs are read from the commit SUBJECTS rather than from
           # `commits/{sha}/pulls`, which would cost one API request per commit
           # (31 on that promotion, on every `synchronize` of the PR). Merge
           # commits carry `Merge pull request #N`, squashes carry `(#N)`. Both
           # approaches were compared on #1557 and returned an identical set.
-          # A rebase-merged PR leaves no reference in either place; the commit
-          # scan above is the only thing that can catch those.
-          SUBJECTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
-                       -q '.[].commit.message | split("\n")[0]')
+          # A rebase-merged PR leaves no reference in either place; the first
+          # source above is the only thing that can catch those.
           FEATURE_PRS=$(echo "$SUBJECTS" \
             | grep -oE 'Merge pull request #[0-9]+|\(#[0-9]+\)$' \
             | grep -oE '[0-9]+' | sort -n -u || true)
