@@ -21,6 +21,14 @@ for f in $COMPOSE_FILE; do
   i=$((i + 1))
 done
 
+# A boot-time unit can be bringing this same project up concurrently (a
+# fresh instance, or a replacement under an ASG). 900s matches this action's
+# command-timeout default of 1800s, so the wait cannot silently outlive the
+# SSM command itself.
+LOCK_FILE="/var/lock/$(basename "$REPO_DIR")-compose.lock"
+exec 200>"$LOCK_FILE"
+flock -w 900 200 || { echo "FATAL: timed out waiting for $LOCK_FILE" >&2; exit 1; }
+
 # ECR auth via the instance's own role — no credential is ever placed on
 # this host by hand or by us.
 REGISTRY=$(printf '%s' "$IMAGE" | cut -d/ -f1)
@@ -51,6 +59,10 @@ for p in $COMPOSE_PROFILES_LIST; do compose_args+=(--profile "$p"); done
 # both GitHub's log and SSM's own API were truncating the same noise.
 IMAGE="$IMAGE" docker compose "${compose_args[@]}" pull --quiet
 IMAGE="$IMAGE" docker compose "${compose_args[@]}" up -d --remove-orphans
+
+# Released once the containers are up -- the healthcheck poll below doesn't
+# touch shared compose state, so it shouldn't make a concurrent deploy wait.
+exec 200>&-
 
 if [ -n "$HEALTHCHECK_URL" ]; then
   for i in $(seq 1 30); do

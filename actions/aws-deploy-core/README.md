@@ -115,6 +115,20 @@ image build outlasts every time. Both stdout and stderr are printed whatever the
 outcome — a deploy that fails silently is the failure mode this action exists to
 avoid.
 
+### The compose section takes a lock
+
+A host that self-provisions can be running its own boot-time `docker compose
+up` on this same project directory when a deploy lands over SSM. Neither
+Compose invocation takes a lock of its own, so two concurrent `up -d` calls
+read and rewrite each other's compose files mid-flight. `flock -w 900
+/var/lock/<repo-dir-basename>-compose.lock` around ECR login through `up -d`
+makes a deploy wait for a boot to finish rather than race it; 900s matches
+this action's `command-timeout` default of 1800s so the wait cannot silently
+outlive the SSM command. Released before the healthcheck poll, which doesn't
+touch shared state and shouldn't make a concurrent deploy wait for it too.
+Any other script bringing this project up must take the same lock, or it
+reintroduces the race.
+
 ## Config comes from SSM
 
 Terraform writes these parameters, so they cannot drift from the resources they
