@@ -14,20 +14,22 @@ set -euo pipefail
 mkdir -p "$REPO_DIR"
 cd "$REPO_DIR"
 
+# A boot-time unit can be bringing this same project up concurrently (a
+# fresh instance, or a replacement under an ASG), and it writes these same
+# compose files too -- the lock has to start before that write, not just
+# before `up -d`, or the two processes can still interleave writes to the
+# same file. 900s matches this action's command-timeout default of 1800s,
+# so the wait cannot silently outlive the SSM command itself.
+LOCK_FILE="/var/lock/$(basename "$REPO_DIR")-compose.lock"
+exec 200>"$LOCK_FILE"
+flock -w 900 200 || { echo "FATAL: timed out waiting for $LOCK_FILE" >&2; exit 1; }
+
 i=0
 for f in $COMPOSE_FILE; do
   var_name="COMPOSE_B64_$i"
   printf '%s' "${!var_name}" | base64 -d > "$REPO_DIR/$f"
   i=$((i + 1))
 done
-
-# A boot-time unit can be bringing this same project up concurrently (a
-# fresh instance, or a replacement under an ASG). 900s matches this action's
-# command-timeout default of 1800s, so the wait cannot silently outlive the
-# SSM command itself.
-LOCK_FILE="/var/lock/$(basename "$REPO_DIR")-compose.lock"
-exec 200>"$LOCK_FILE"
-flock -w 900 200 || { echo "FATAL: timed out waiting for $LOCK_FILE" >&2; exit 1; }
 
 # ECR auth via the instance's own role — no credential is ever placed on
 # this host by hand or by us.
