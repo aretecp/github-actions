@@ -11,8 +11,8 @@ description: >-
 inputs:
   target:
     description: >-
-      Deploy strategy: `s3-cloudfront` or `ec2-compose`. `lambda-image` is next;
-      `ecs-service` will be added when something actually runs on ECS.
+      Deploy strategy: `s3-cloudfront`, `ec2-compose` or `ecs-service`.
+      `lambda-image` is next.
     required: true
 
   aws-role-arn:
@@ -31,8 +31,8 @@ inputs:
       drift from the resources they name — which is why config comes from here
       rather than from repository variables with hardcoded fallbacks.
 
-      Required for `s3-cloudfront`. Unused by `ec2-compose`, which is handed its
-      instance id directly.
+      Required for `s3-cloudfront` and `ecs-service`. Unused by `ec2-compose`,
+      which is handed its instance id directly.
     required: false
     default: ''
 
@@ -87,12 +87,12 @@ inputs:
 
   image:
     description: >-
-      ec2-compose: full pre-built image reference to deploy, e.g.
+      ec2-compose, ecs-service: full pre-built image reference to deploy, e.g.
       `<account>.dkr.ecr.<region>.amazonaws.com/lumios:v6.17.1`. The caller
       builds and pushes this itself, same as source-dir for s3-cloudfront —
-      this action does not build. The host authenticates to ECR with its own
-      instance role and pulls; no git, no Dockerfile, no source ever touches
-      the host.
+      this action does not build. ec2-compose's host authenticates to ECR with
+      its own instance role and pulls; no git, no Dockerfile, no source ever
+      touches the host.
     required: false
     default: ''
 
@@ -106,7 +106,11 @@ inputs:
     default: ''
 
   env-file-path:
-    description: 'ec2-compose: local path to the rendered dotenv to upload to that parameter. Omit to reuse whatever the parameter already holds.'
+    description: >-
+      ec2-compose: local path to the rendered dotenv to upload to
+      env-parameter-name. ecs-service: local path to upload to the S3 object
+      at env-file-s3-uri (resolved from SSM). Omit either way to reuse
+      whatever destination already holds.
     required: false
     default: ''
 
@@ -116,7 +120,10 @@ inputs:
     default: .env
 
   healthcheck-url:
-    description: 'ec2-compose: URL curled on the host after compose up. Empty skips the check.'
+    description: >-
+      ec2-compose: URL curled on the host after compose up. ecs-service: URL
+      curled from the runner after the service stabilizes. Empty skips the
+      check either way.
     required: false
     default: ''
 
@@ -124,6 +131,44 @@ inputs:
     description: 'ec2-compose: seconds to wait for the remote command. A cold image build outlasts the default easily.'
     required: false
     default: '1800'
+
+  # ── ecs-service ──────────────────────────────────────────────────────────
+  container-name:
+    description: >-
+      ecs-service: name of the container definition to point at `image`
+      within the current task definition (`ecs-task-family`, from SSM). The
+      rest of the task definition — roles, network mode, volumes, sizing —
+      is carried over unchanged from the revision Terraform registered.
+    required: false
+    default: ''
+
+  migrate-command:
+    description: >-
+      ecs-service: command to run as a one-off gating task, on the new task
+      definition revision, before `update-service` — e.g. `/app/bin/migrate`.
+      Space-separated. Empty skips the gate; a nonzero exit fails the deploy
+      before any traffic reaches the new revision.
+    required: false
+    default: ''
+
+  post-deploy-command:
+    description: >-
+      ecs-service: command to run as a one-off task after the service
+      reaches steady state — e.g. an app's own post-deploy sync task. Space-
+      separated. Empty skips it. Intentionally generic: this action carries
+      no app-specific business logic, the same reason healthcheck-url is
+      just a URL and not a per-app health contract.
+    required: false
+    default: ''
+
+  task-timeout:
+    description: >-
+      ecs-service: seconds to wait for the migrate/post-deploy one-off tasks
+      to stop. Separate from command-timeout (ec2-compose's SSM command
+      budget) because these are two different wait mechanisms on two
+      different targets.
+    required: false
+    default: '600'
 
   invalidation-paths:
     description: 's3-cloudfront: space-separated CloudFront paths to invalidate.'
@@ -151,6 +196,9 @@ outputs:
   command-id:
     description: 'ec2-compose: the SSM command that was sent.'
     value: ${{ steps.send.outputs.command_id }}
+  task-definition-arn:
+    description: 'ecs-service: the task definition revision that was registered and deployed.'
+    value: ${{ steps.register-task-def.outputs.task_definition_arn }}
 
 runs:
   using: composite
@@ -171,6 +219,7 @@ runs:
         IMAGE: ${{ inputs.image }}
         ENV_PARAMETER_NAME: ${{ inputs.env-parameter-name }}
         ENV_FILE_PATH: ${{ inputs.env-file-path }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
       run: |
         set -euo pipefail
 
@@ -212,12 +261,29 @@ runs:
               exit 1
             fi
             ;;
-          lambda-image|ecs-service)
+          ecs-service)
+            case "$SSM_PREFIX" in
+              /*) ;;
+              *) echo "::error::target=ecs-service requires ssm-prefix starting with '/': got '$SSM_PREFIX'" >&2; exit 1 ;;
+            esac
+            missing=()
+            [ -z "${IMAGE:-}" ] && missing+=(image)
+            [ -z "${CONTAINER_NAME:-}" ] && missing+=(container-name)
+            if (( ${#missing[@]} )); then
+              echo "::error::target=ecs-service requires: ${missing[*]}" >&2
+              exit 1
+            fi
+            if [ -n "${ENV_FILE_PATH:-}" ] && [ ! -s "$ENV_FILE_PATH" ]; then
+              echo "::error::env-file-path '$ENV_FILE_PATH' is missing or empty. Did the Infisical render step run?" >&2
+              exit 1
+            fi
+            ;;
+          lambda-image)
             echo "::error::target '$TARGET' is not implemented yet." >&2
             exit 1
             ;;
           *)
-            echo "::error::Unknown target '$TARGET'. Supported: s3-cloudfront, ec2-compose." >&2
+            echo "::error::Unknown target '$TARGET'. Supported: s3-cloudfront, ec2-compose, ecs-service." >&2
             exit 1
             ;;
         esac
@@ -233,6 +299,9 @@ runs:
         TARGET: ${{ inputs.target }}
         SOURCE_DIR: ${{ inputs.source-dir }}
         INSTANCE_ID: ${{ inputs.instance-id }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        MIGRATE_COMMAND: ${{ inputs.migrate-command }}
+        POST_DEPLOY_COMMAND: ${{ inputs.post-deploy-command }}
       run: |
         set -euo pipefail
         if [ "$TARGET" != "s3-cloudfront" ] && [ -n "$SOURCE_DIR" ]; then
@@ -241,6 +310,18 @@ runs:
         fi
         if [ "$TARGET" != "ec2-compose" ] && [ -n "$INSTANCE_ID" ]; then
           echo "::error::instance-id belongs to target=ec2-compose, but target=$TARGET." >&2
+          exit 1
+        fi
+        if [ "$TARGET" != "ecs-service" ] && [ -n "$CONTAINER_NAME" ]; then
+          echo "::error::container-name belongs to target=ecs-service, but target=$TARGET." >&2
+          exit 1
+        fi
+        if [ "$TARGET" != "ecs-service" ] && [ -n "$MIGRATE_COMMAND" ]; then
+          echo "::error::migrate-command belongs to target=ecs-service, but target=$TARGET." >&2
+          exit 1
+        fi
+        if [ "$TARGET" != "ecs-service" ] && [ -n "$POST_DEPLOY_COMMAND" ]; then
+          echo "::error::post-deploy-command belongs to target=ecs-service, but target=$TARGET." >&2
           exit 1
         fi
 
@@ -292,6 +373,26 @@ runs:
             echo "|---|---|"
             echo "| Bucket | \`$bucket\` |"
             echo "| Distribution | \`$distribution_id\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$TARGET" = "ecs-service" ]; then
+          cluster=$(get_param ecs-cluster-name)
+          service=$(get_param ecs-service-name)
+          task_family=$(get_param ecs-task-family)
+          env_file_s3_uri=$(get_param env-file-s3-uri)
+          echo "cluster=$cluster" >> "$GITHUB_OUTPUT"
+          echo "service=$service" >> "$GITHUB_OUTPUT"
+          echo "task_family=$task_family" >> "$GITHUB_OUTPUT"
+          echo "env_file_s3_uri=$env_file_s3_uri" >> "$GITHUB_OUTPUT"
+          {
+            echo "### AWS deploy target"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Cluster | \`$cluster\` |"
+            echo "| Service | \`$service\` |"
+            echo "| Task family | \`$task_family\` |"
           } >> "$GITHUB_STEP_SUMMARY"
         fi
 
@@ -474,3 +575,140 @@ runs:
           exit 1
         fi
         echo "Deploy succeeded."
+
+    # ── 7. ecs-service ───────────────────────────────────────────────────────
+    - name: Upload the rendered dotenv to S3
+      if: ${{ inputs.target == 'ecs-service' && inputs.env-file-path != '' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        ENV_FILE_S3_URI: ${{ steps.resolve.outputs.env_file_s3_uri }}
+        ENV_FILE_PATH: ${{ inputs.env-file-path }}
+      run: |
+        set -euo pipefail
+        aws s3 cp "$ENV_FILE_PATH" "$ENV_FILE_S3_URI"
+        echo "Wrote $(wc -l < "$ENV_FILE_PATH") lines to $ENV_FILE_S3_URI"
+
+    # Only the named container's image changes; roles, network mode, sizing
+    # and volumes carry over from whatever Terraform last applied.
+    - name: Register new task definition revision
+      id: register-task-def
+      if: ${{ inputs.target == 'ecs-service' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        TASK_FAMILY: ${{ steps.resolve.outputs.task_family }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+
+        aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+          --query 'taskDefinition' > /tmp/current-task-def.json
+
+        # Deny-list so a future task-def field (ephemeralStorage, proxyConfiguration, ...) survives unless named here.
+        jq --arg name "$CONTAINER_NAME" --arg image "$IMAGE" '
+          .containerDefinitions |= map(if .name == $name then .image = $image else . end) |
+          del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+              .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+        ' /tmp/current-task-def.json > /tmp/new-task-def.json
+
+        if ! jq -e --arg name "$CONTAINER_NAME" \
+          '.containerDefinitions[] | select(.name == $name)' /tmp/new-task-def.json > /dev/null; then
+          echo "::error::container-name '$CONTAINER_NAME' not found in task family '$TASK_FAMILY'." >&2
+          exit 1
+        fi
+
+        task_definition_arn=$(aws ecs register-task-definition \
+          --cli-input-json file:///tmp/new-task-def.json \
+          --query 'taskDefinition.taskDefinitionArn' --output text)
+        echo "task_definition_arn=$task_definition_arn" >> "$GITHUB_OUTPUT"
+        echo "Registered $task_definition_arn"
+
+    # Reused from the running service so a one-off task always shares its
+    # network path — not a new input to keep in sync with the service.
+    - name: Resolve the service's network configuration
+      id: network-config
+      if: ${{ inputs.target == 'ecs-service' && inputs.dry-run != 'true' && (inputs.migrate-command != '' || inputs.post-deploy-command != '') }}
+      shell: bash
+      env:
+        CLUSTER: ${{ steps.resolve.outputs.cluster }}
+        SERVICE: ${{ steps.resolve.outputs.service }}
+      run: |
+        set -euo pipefail
+        config=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+          --query 'services[0].networkConfiguration' --output json)
+        if [ "$config" = "null" ]; then
+          echo "::error::service '$SERVICE' has no networkConfiguration — awsvpc mode expected." >&2
+          exit 1
+        fi
+        {
+          echo "config<<ECS_NETWORK_CONFIG_EOF"
+          echo "$config"
+          echo "ECS_NETWORK_CONFIG_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run gating migration task
+      if: ${{ inputs.target == 'ecs-service' && inputs.migrate-command != '' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        CLUSTER: ${{ steps.resolve.outputs.cluster }}
+        TASK_DEFINITION_ARN: ${{ steps.register-task-def.outputs.task_definition_arn }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        COMMAND: ${{ inputs.migrate-command }}
+        NETWORK_CONFIGURATION: ${{ steps.network-config.outputs.config }}
+        TASK_TIMEOUT: ${{ inputs.task-timeout }}
+        LABEL: migrate
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/scripts/ecs-run-task.sh"
+
+    # After the gating migration, not before: a failed migration should never
+    # point the service at the revision it failed on.
+    - name: Update the ECS service
+      if: ${{ inputs.target == 'ecs-service' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        CLUSTER: ${{ steps.resolve.outputs.cluster }}
+        SERVICE: ${{ steps.resolve.outputs.service }}
+        TASK_DEFINITION_ARN: ${{ steps.register-task-def.outputs.task_definition_arn }}
+      run: |
+        set -euo pipefail
+        aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+          --task-definition "$TASK_DEFINITION_ARN" >/dev/null
+        echo "Service $SERVICE updated to $TASK_DEFINITION_ARN"
+
+    - name: Wait for the service to stabilize
+      if: ${{ inputs.target == 'ecs-service' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        CLUSTER: ${{ steps.resolve.outputs.cluster }}
+        SERVICE: ${{ steps.resolve.outputs.service }}
+      run: |
+        set -euo pipefail
+        aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+        echo "Service $SERVICE stable."
+
+    - name: Run post-deploy task
+      if: ${{ inputs.target == 'ecs-service' && inputs.post-deploy-command != '' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        CLUSTER: ${{ steps.resolve.outputs.cluster }}
+        TASK_DEFINITION_ARN: ${{ steps.register-task-def.outputs.task_definition_arn }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        COMMAND: ${{ inputs.post-deploy-command }}
+        NETWORK_CONFIGURATION: ${{ steps.network-config.outputs.config }}
+        TASK_TIMEOUT: ${{ inputs.task-timeout }}
+        LABEL: post-deploy
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/scripts/ecs-run-task.sh"
+
+    - name: Healthcheck
+      if: ${{ inputs.target == 'ecs-service' && inputs.healthcheck-url != '' && inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        HEALTHCHECK_URL: ${{ inputs.healthcheck-url }}
+      run: |
+        set -euo pipefail
+        if ! curl -fsS --retry 5 --retry-delay 5 --retry-connrefused "$HEALTHCHECK_URL" >/dev/null; then
+          echo "::error::Healthcheck failed: $HEALTHCHECK_URL" >&2
+          exit 1
+        fi
+        echo "Healthcheck passed: $HEALTHCHECK_URL"
