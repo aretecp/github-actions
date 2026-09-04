@@ -35,7 +35,9 @@ inputs:
   extra-shared-path-1:
     description: >-
       Optional additional folder (in shared-project-slug) rendered into the app .env.
-      On a key conflict the primary app-path folder WINS (merged last). Empty = not loaded.
+      Must not share a key name with app-path or any other loaded folder — a real
+      collision does not reliably resolve to app-path winning (see the merge step's
+      comment in vps-deploy-core/action.yml). Empty = not loaded.
     required: false
     default: ''
 
@@ -46,6 +48,24 @@ inputs:
 
   extra-shared-path-3:
     description: Third optional shared folder rendered into the app .env (see extra-shared-path-1).
+    required: false
+    default: ''
+
+  extra-app-path-1:
+    description: >-
+      Optional additional folder in app-project-slug (not shared-project-slug) rendered
+      into the app .env — for an app with secrets split across its own folders.
+      Merges the same way as extra-shared-path-1 — same key-collision caveat applies.
+    required: false
+    default: ''
+
+  extra-app-path-2:
+    description: Second optional app folder rendered into the app .env (see extra-app-path-1).
+    required: false
+    default: ''
+
+  extra-app-path-3:
+    description: Third optional app folder rendered into the app .env (see extra-app-path-1).
     required: false
     default: ''
 
@@ -229,8 +249,9 @@ runs:
         dotenv-output-path: ${{ runner.temp }}/${{ inputs.env-file-name }}
 
     # Optional additional shared folders rendered into the same .env. Each is its
-    # own conditional step (a composite can't loop uses:); the merge step
-    # concatenates them with the primary app folder LAST so it wins on any dup key.
+    # own conditional step (a composite can't loop uses:). Folders MUST NOT share
+    # a key name — see the merge step below for why a real collision doesn't
+    # reliably resolve in app-path's favor despite the concatenation order.
     - name: Load extra shared folder 1 (dotenv mode)
       id: extra-1
       if: ${{ inputs.extra-shared-path-1 != '' }}
@@ -276,24 +297,79 @@ runs:
         export-as-env: dotenv
         dotenv-output-path: ${{ runner.temp }}/extra-shared-3.env
 
-    - name: Merge extra shared folders into the env file
-      if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' }}
+    - name: Load extra app folder 1 (dotenv mode)
+      id: extra-app-1
+      if: ${{ inputs.extra-app-path-1 != '' }}
+      uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+      with:
+        method: oidc
+        identity-id: ${{ inputs.infisical-identity-id }}
+        project-slug: ${{ inputs.app-project-slug }}
+        environment: ${{ inputs.env-slug }}
+        path: ${{ inputs.extra-app-path-1 }}
+        recursive: 'true'
+        include-imports: 'true'
+        export-as-env: dotenv
+        dotenv-output-path: ${{ runner.temp }}/extra-app-1.env
+
+    - name: Load extra app folder 2 (dotenv mode)
+      id: extra-app-2
+      if: ${{ inputs.extra-app-path-2 != '' }}
+      uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+      with:
+        method: oidc
+        identity-id: ${{ inputs.infisical-identity-id }}
+        project-slug: ${{ inputs.app-project-slug }}
+        environment: ${{ inputs.env-slug }}
+        path: ${{ inputs.extra-app-path-2 }}
+        recursive: 'true'
+        include-imports: 'true'
+        export-as-env: dotenv
+        dotenv-output-path: ${{ runner.temp }}/extra-app-2.env
+
+    - name: Load extra app folder 3 (dotenv mode)
+      id: extra-app-3
+      if: ${{ inputs.extra-app-path-3 != '' }}
+      uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+      with:
+        method: oidc
+        identity-id: ${{ inputs.infisical-identity-id }}
+        project-slug: ${{ inputs.app-project-slug }}
+        environment: ${{ inputs.env-slug }}
+        path: ${{ inputs.extra-app-path-3 }}
+        recursive: 'true'
+        include-imports: 'true'
+        export-as-env: dotenv
+        dotenv-output-path: ${{ runner.temp }}/extra-app-3.env
+
+    - name: Merge extra folders into the env file
+      if: ${{ inputs.extra-shared-path-1 != '' || inputs.extra-shared-path-2 != '' || inputs.extra-shared-path-3 != '' || inputs.extra-app-path-1 != '' || inputs.extra-app-path-2 != '' || inputs.extra-app-path-3 != '' }}
       shell: bash
       env:
         APP_FILE: ${{ steps.load-app-secrets.outputs.dotenv-file-path }}
         E1: ${{ steps.extra-1.outputs.dotenv-file-path }}
         E2: ${{ steps.extra-2.outputs.dotenv-file-path }}
         E3: ${{ steps.extra-3.outputs.dotenv-file-path }}
+        E4: ${{ steps.extra-app-1.outputs.dotenv-file-path }}
+        E5: ${{ steps.extra-app-2.outputs.dotenv-file-path }}
+        E6: ${{ steps.extra-app-3.outputs.dotenv-file-path }}
       run: |
         set -euo pipefail
         tmp="$(mktemp)"
-        # Extras first, primary app folder LAST → app wins on duplicate keys.
-        for f in "$E1" "$E2" "$E3"; do
+        # Concatenated extras-first, primary app folder last — but this only
+        # controls file order, not actual precedence. load-infisical-secrets'
+        # dotenv mode resolves a folder's keys by diffing newly-exported env-var
+        # NAMES against everything already exported earlier in this job; a key
+        # already set by an earlier load in this sequence is invisible to a
+        # later load's diff, so on a real collision the later folder's value is
+        # dropped rather than overriding — regardless of this concatenation
+        # order. Callers must keep every loaded folder's keys disjoint.
+        for f in "$E1" "$E2" "$E3" "$E4" "$E5" "$E6"; do
           [[ -n "$f" && -f "$f" ]] && cat "$f" >> "$tmp"
         done
         cat "$APP_FILE" >> "$tmp"
         mv "$tmp" "$APP_FILE"
-        echo "Merged extra shared folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
+        echo "Merged extra folder(s) into $APP_FILE ($(grep -c '=' "$APP_FILE") vars total)."
 
     - name: Append VERSION to dotenv file
       shell: bash
