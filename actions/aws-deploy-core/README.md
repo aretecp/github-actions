@@ -22,8 +22,8 @@ composes [`load-infisical-secrets`](../load-infisical-secrets) ahead of this.
 |---|---|
 | `s3-cloudfront` | shipped |
 | `ec2-compose` | shipped — LumiOS on AWS is the consumer |
+| `ecs-service` | shipped — Sextant is the consumer (`arilearn-phx#1577`) |
 | `lambda-image` | next — `arilearn-phx`'s extractor sidecar is the consumer |
-| `ecs-service` | not built. Nothing runs on ECS yet; added when something does |
 
 ## Usage
 
@@ -132,6 +132,61 @@ concurrent deploy wait for it too. Any other script bringing this project up
 must take the same lock, starting before it writes any compose file, or it
 reintroduces the race.
 
+## `ecs-service`
+
+Deploys onto an existing Fargate service. Registers a new task definition
+revision (only the named container's image changes — everything else carries
+over from what Terraform last applied), optionally gates on a one-off
+migration task, updates the service, waits for it to stabilize, then
+optionally runs a post-deploy task and a healthcheck.
+
+```yaml
+  - uses: aretecp/github-actions/actions/load-infisical-secrets@v2
+    id: env
+    with:
+      method: oidc
+      identity-id: ${{ vars.INFISICAL_OIDC_IDENTITY_ID }}
+      project-slug: ${{ vars.INFISICAL_INTERNAL_PROJECT_SLUG }}
+      environment: prod
+      path: /sextant
+      export-as-env: dotenv
+      dotenv-output-path: ${{ runner.temp }}/.env
+
+  - uses: aretecp/github-actions/actions/aws-deploy-core@v2
+    with:
+      target: ecs-service
+      aws-role-arn: ${{ vars.SEXTANT_DEPLOY_ROLE_ARN }}
+      ssm-prefix: /sextant/prod
+      image: ${{ steps.build.outputs.image }}
+      container-name: app
+      env-file-path: ${{ runner.temp }}/.env
+      migrate-command: /app/bin/migrate
+      healthcheck-url: https://sextant.lumistlabs.ai/healthz
+```
+
+### Subnets and security groups are never an input
+
+A one-off migration or post-deploy task runs with the **service's own**
+`networkConfiguration`, read fresh from `describe-services` rather than
+asked of the caller — the same reasoning `ec2-compose` doesn't take an SSH
+key: the fewer places a network path is spelled out, the fewer places it can
+drift from what the service itself actually uses.
+
+### The task definition is cloned, not templated
+
+`register-task-definition` gets the current revision's JSON back from
+`describe-task-definition`, with only the named container's `image` field
+changed and the fields `register` rejects (`taskDefinitionArn`, `revision`,
+`status`, ...) stripped. No task-definition template lives in this repo or
+the caller's — Terraform is still the only thing that decides roles, sizing,
+volumes and network mode.
+
+### The migration gate runs before `update-service`, never after
+
+A migration that fails must never leave the service pointed at the revision
+it failed on. `run-task` on the new revision, wait for `STOPPED`, check the
+container's `exitCode` — only then does `update-service` run.
+
 ## Config comes from SSM
 
 Terraform writes these parameters, so they cannot drift from the resources they
@@ -141,6 +196,7 @@ name. Convention is `{ssm-prefix}/{name}`:
 |---|---|
 | `s3-cloudfront` | `s3-bucket-name`, `cloudfront-distribution-id` |
 | `ec2-compose` | none — it is handed its instance id directly |
+| `ecs-service` | `ecs-cluster-name`, `ecs-service-name`, `ecs-task-family`, `env-file-s3-uri` |
 
 A missing parameter fails with the full path in the error, before anything is
 mutated. The alternative — repository variables with hardcoded fallbacks, as
@@ -150,11 +206,11 @@ mutated. The alternative — repository variables with hardcoded fallbacks, as
 
 | Input | Required | Default | Notes |
 |---|---|---|---|
-| `target` | yes | — | `s3-cloudfront` or `ec2-compose` |
+| `target` | yes | — | `s3-cloudfront`, `ec2-compose` or `ecs-service` |
 | `aws-role-arn` | yes | — | caller needs `id-token: write` |
 | `aws-region` | no | `us-east-1` | |
 | `dry-run` | no | `false` | resolves config and reports, mutates nothing |
-| `ssm-prefix` | s3-cloudfront | — | must start with `/` |
+| `ssm-prefix` | s3-cloudfront, ecs-service | — | must start with `/` |
 | `source-dir` | s3-cloudfront | — | built directory to sync |
 | `delete-removed` | no | `true` | `--delete` on the sync |
 | `invalidation-paths` | no | `/*` | space-separated |
@@ -163,16 +219,21 @@ mutated. The alternative — repository variables with hardcoded fallbacks, as
 | `repo-dir` | ec2-compose | — | absolute path to the checkout on the host |
 | `ref` | ec2-compose | — | git ref to check out on the host |
 | `env-parameter-name` | ec2-compose | — | SecureString holding the dotenv |
-| `env-file-path` | no | — | local dotenv to upload to that parameter |
-| `env-file-name` | no | `.env` | filename on the host |
-| `compose-file` | no | `docker-compose.yml` | space-separated for an override stack |
-| `compose-profiles` | no | — | space-separated `--profile` values |
-| `healthcheck-url` | no | — | curled on the host after `compose up` |
-| `command-timeout` | no | `1800` | seconds; a cold build outlasts less |
+| `image` | ec2-compose, ecs-service | — | full pre-built image reference |
+| `env-file-path` | no | — | local dotenv, uploaded to env-parameter-name (ec2-compose) or env-file-s3-uri (ecs-service) |
+| `env-file-name` | no | `.env` | ec2-compose: filename on the host |
+| `compose-file` | no | `docker-compose.yml` | ec2-compose: space-separated for an override stack |
+| `compose-profiles` | no | — | ec2-compose: space-separated `--profile` values |
+| `healthcheck-url` | no | — | curled on the host (ec2-compose) or from the runner (ecs-service) |
+| `command-timeout` | no | `1800` | ec2-compose: seconds; a cold build outlasts less |
+| `container-name` | ecs-service | — | container definition to point at `image` |
+| `migrate-command` | no | — | ecs-service: gating one-off task before `update-service`; empty skips |
+| `post-deploy-command` | no | — | ecs-service: one-off task after steady state; empty skips |
+| `task-timeout` | no | `600` | ecs-service: seconds to wait for a one-off task to stop |
 
 ## Outputs
 
-`bucket`, `distribution-id`, `invalidation-id`, `command-id`.
+`bucket`, `distribution-id`, `invalidation-id`, `command-id`, `task-definition-arn`.
 
 ## Three things it does that the workflows it replaces did not
 
@@ -198,7 +259,11 @@ Not symmetric across targets, so it is deliberately not offered here uniformly.
 static-site rollback is a redeploy of an older ref. A real one needs bucket
 versioning or retained artifacts — a Terraform change, not a workflow input.
 `lambda-image` will be different: the image is sha-pinned and immutable, so
-rollback is repointing at a previous tag.
+rollback is repointing at a previous tag. `ecs-service` is the same shape:
+every deploy registers a new, immutable task definition revision, so rollback
+is `aws ecs update-service --task-definition <previous-revision-arn>` — no
+input for it here, since the previous ARN is exactly what the prior workflow
+run's `task-definition-arn` output already recorded.
 
 ## Failure notification
 
