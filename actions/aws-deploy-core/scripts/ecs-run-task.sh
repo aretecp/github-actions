@@ -7,9 +7,13 @@ set -euo pipefail
 : "${CLUSTER:?}" "${TASK_DEFINITION_ARN:?}" "${CONTAINER_NAME:?}" \
   "${COMMAND:?}" "${NETWORK_CONFIGURATION:?}" "${TASK_TIMEOUT:?}" "${LABEL:?}"
 
-read -ra cmd_array <<< "$COMMAND"
-cmd_json=$(printf '%s\n' "${cmd_array[@]}" | jq -R . | jq -s .)
-overrides=$(jq -n --arg name "$CONTAINER_NAME" --argjson cmd "$cmd_json" \
+# COMMAND is a JSON array, not a space-separated string — an argument like
+# an Elixir eval expression can itself contain spaces.
+if ! echo "$COMMAND" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "::error::$LABEL command must be a JSON array, e.g. '[\"/app/bin/migrate\"]'. Got: $COMMAND" >&2
+  exit 1
+fi
+overrides=$(jq -n --arg name "$CONTAINER_NAME" --argjson cmd "$COMMAND" \
   '{containerOverrides: [{name: $name, command: $cmd}]}')
 
 task_arn=$(aws ecs run-task \
