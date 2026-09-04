@@ -145,19 +145,21 @@ inputs:
   migrate-command:
     description: >-
       ecs-service: command to run as a one-off gating task, on the new task
-      definition revision, before `update-service` — e.g. `/app/bin/migrate`.
-      Space-separated. Empty skips the gate; a nonzero exit fails the deploy
-      before any traffic reaches the new revision.
+      definition revision, before `update-service` — e.g. `["/app/bin/migrate"]`.
+      A JSON array, not a space-separated string: an argument can itself
+      contain spaces (an eval expression, for instance), which splitting on
+      whitespace would break apart. Empty skips the gate; a nonzero exit
+      fails the deploy before any traffic reaches the new revision.
     required: false
     default: ''
 
   post-deploy-command:
     description: >-
       ecs-service: command to run as a one-off task after the service
-      reaches steady state — e.g. an app's own post-deploy sync task. Space-
-      separated. Empty skips it. Intentionally generic: this action carries
-      no app-specific business logic, the same reason healthcheck-url is
-      just a URL and not a per-app health contract.
+      reaches steady state — e.g. an app's own post-deploy sync task. Same
+      JSON-array format as migrate-command. Empty skips it. Intentionally
+      generic: this action carries no app-specific business logic, the same
+      reason healthcheck-url is just a URL and not a per-app health contract.
     required: false
     default: ''
 

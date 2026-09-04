@@ -160,7 +160,7 @@ optionally runs a post-deploy task and a healthcheck.
       image: ${{ steps.build.outputs.image }}
       container-name: app
       env-file-path: ${{ runner.temp }}/.env
-      migrate-command: /app/bin/migrate
+      migrate-command: '["/app/bin/migrate"]'
       healthcheck-url: https://sextant.lumistlabs.ai/healthz
 ```
 
@@ -227,8 +227,8 @@ mutated. The alternative — repository variables with hardcoded fallbacks, as
 | `healthcheck-url` | no | — | curled on the host (ec2-compose) or from the runner (ecs-service) |
 | `command-timeout` | no | `1800` | ec2-compose: seconds; a cold build outlasts less |
 | `container-name` | ecs-service | — | container definition to point at `image` |
-| `migrate-command` | no | — | ecs-service: gating one-off task before `update-service`; empty skips |
-| `post-deploy-command` | no | — | ecs-service: one-off task after steady state; empty skips |
+| `migrate-command` | no | — | ecs-service: JSON array, gating one-off task before `update-service`; empty skips |
+| `post-deploy-command` | no | — | ecs-service: JSON array, one-off task after steady state; empty skips |
 | `task-timeout` | no | `600` | ecs-service: seconds to wait for a one-off task to stop |
 
 ## Outputs
