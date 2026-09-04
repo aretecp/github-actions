@@ -14,6 +14,16 @@ set -euo pipefail
 mkdir -p "$REPO_DIR"
 cd "$REPO_DIR"
 
+# A boot-time unit can be bringing this same project up concurrently (a
+# fresh instance, or a replacement under an ASG), and it writes these same
+# compose files too -- the lock has to start before that write, not just
+# before `up -d`, or the two processes can still interleave writes to the
+# same file. 900s matches this action's command-timeout default of 1800s,
+# so the wait cannot silently outlive the SSM command itself.
+LOCK_FILE="/var/lock/$(basename "$REPO_DIR")-compose.lock"
+exec 200>"$LOCK_FILE"
+flock -w 900 200 || { echo "FATAL: timed out waiting for $LOCK_FILE" >&2; exit 1; }
+
 i=0
 for f in $COMPOSE_FILE; do
   var_name="COMPOSE_B64_$i"
@@ -51,6 +61,10 @@ for p in $COMPOSE_PROFILES_LIST; do compose_args+=(--profile "$p"); done
 # both GitHub's log and SSM's own API were truncating the same noise.
 IMAGE="$IMAGE" docker compose "${compose_args[@]}" pull --quiet
 IMAGE="$IMAGE" docker compose "${compose_args[@]}" up -d --remove-orphans
+
+# Released once the containers are up -- the healthcheck poll below doesn't
+# touch shared compose state, so it shouldn't make a concurrent deploy wait.
+exec 200>&-
 
 if [ -n "$HEALTHCHECK_URL" ]; then
   for i in $(seq 1 30); do
