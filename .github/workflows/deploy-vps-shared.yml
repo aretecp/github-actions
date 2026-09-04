@@ -91,9 +91,10 @@ on:
         description: >-
           Optional ADDITIONAL folder (in shared-project-slug) to render into the
           app `.env` — e.g. `/teams` or `/aws/accounts/arete/ses-sender-user`.
-          For shared app secrets that several services consume. On a key
-          conflict the primary `app-path` folder WINS (it is merged last).
-          Empty (default) = not loaded.
+          For shared app secrets that several services consume. Must not share a
+          key name with app-path or any other loaded folder — a real collision does
+          not reliably resolve to app-path winning (see vps-deploy-core/action.yml's
+          merge step). Empty (default) = not loaded.
         required: false
         type: string
         default: ''
@@ -106,6 +107,27 @@ on:
 
       extra-shared-path-3:
         description: 'Third optional shared folder rendered into the app `.env` (see extra-shared-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      extra-app-path-1:
+        description: >-
+          Optional additional folder in app-project-slug (not shared-project-slug) rendered
+          into the app `.env` — for an app with secrets split across its own folders.
+          Merges the same way as extra-shared-path-1 — same key-collision caveat applies.
+        required: false
+        type: string
+        default: ''
+
+      extra-app-path-2:
+        description: 'Second optional app folder rendered into the app `.env` (see extra-app-path-1).'
+        required: false
+        type: string
+        default: ''
+
+      extra-app-path-3:
+        description: 'Third optional app folder rendered into the app `.env` (see extra-app-path-1).'
         required: false
         type: string
         default: ''
@@ -404,6 +426,9 @@ jobs:
           extra-shared-path-1: ${{ inputs.extra-shared-path-1 }}
           extra-shared-path-2: ${{ inputs.extra-shared-path-2 }}
           extra-shared-path-3: ${{ inputs.extra-shared-path-3 }}
+          extra-app-path-1: ${{ inputs.extra-app-path-1 }}
+          extra-app-path-2: ${{ inputs.extra-app-path-2 }}
+          extra-app-path-3: ${{ inputs.extra-app-path-3 }}
           infra-path: ${{ inputs.infra-path }}
           vps-user: ${{ inputs.vps-user }}
           repo-dir: ${{ inputs.repo-dir }}
